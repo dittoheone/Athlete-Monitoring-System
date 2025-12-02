@@ -9,7 +9,15 @@ initializeDatabase();
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173", // untuk dev lokal
+      "https://athlete-monitoring-system-aw7l-if2d84ojp-yanardrognuhs-projects.vercel.app/", // ganti dengan domain Vercel-mu
+    ],
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // Import routes
