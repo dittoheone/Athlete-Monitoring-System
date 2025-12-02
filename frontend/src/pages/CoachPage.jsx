@@ -2,7 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { LayoutDashboard, Users, Trophy } from "lucide-react";
 import Navbar from "../components/common/Navbar";
 import Sidebar from "../components/common/Sidebar";
-import Dashboard from "../components/coach/dashboard";
+import Dashboard from "../components/coach/Dashboard";
 import AthleteProfile from "../components/coach/AthleteProfile";
 import TeamOverview from "../components/coach/TeamOverview";
 import AthleteManagement from "../components/coach/AthleteManagement";

@@ -90,7 +90,8 @@ function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       priority INTEGER NOT NULL,
       trigger_condition TEXT NOT NULL,
-      recommendation_text TEXT NOT NULL
+      recommendation_text TEXT NOT NULL,
+      UNIQUE(trigger_condition, recommendation_text)
     );
   `);
 
@@ -190,44 +191,5 @@ function insertSampleData() {
   console.log("Medis - Email: medis@test.com, Password: password123");
   console.log("Pelatih - Email: pelatih@test.com, Password: password123");
 }
-
-// Insert sample recommendation rules
-const insertRule = db.prepare(`
-  INSERT INTO recommendation_rules (priority, trigger_condition, recommendation_text) 
-  VALUES (?, ?, ?)
-`);
-
-// Example rules
-const rules = [
-  [
-    1,
-    '{"Cedera": ">=7"}',
-    "Atlet mengalami cedera berat. Segera rujuk ke fisioterapis dan hentikan latihan intensif.",
-  ],
-  [
-    2,
-    '{"Pemulihan": "<5"}',
-    "Proses pemulihan masih rendah. Fokus pada terapi ringan dan pemantauan harian.",
-  ],
-  [
-    3,
-    '{"Fleksibilitas": "<4", "Kekuatan": "<5"}',
-    "Kekuatan dan fleksibilitas di bawah standar. Tambahkan latihan penguatan dan peregangan 3x/minggu.",
-  ],
-  [
-    4,
-    '{"Stress": ">=8"}',
-    "Tingkat stres sangat tinggi. Lakukan sesi konseling psikologis dan kurangi beban latihan.",
-  ],
-  [
-    5,
-    '{"Rata-rata Jam Tidur": "<6"}',
-    "Kurang tidur kronis. Edukasi atlet tentang pentingnya istirahat dan pantau pola tidur.",
-  ],
-];
-
-rules.forEach(([priority, condition, text]) => {
-  insertRule.run(priority, condition, text);
-});
 
 module.exports = { db, initializeDatabase };

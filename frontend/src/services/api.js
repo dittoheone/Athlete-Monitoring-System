@@ -66,6 +66,7 @@ export const exerciseAPI = {
   getPrograms: (athleteId) =>
     api.get(`/exercises/programs/athlete/${athleteId}`),
   createProgram: (data) => api.post("/exercises/programs", data),
+  getTrainingPrograms: () => api.get("/exercises/programs"),
 };
 
 // Team APIs
