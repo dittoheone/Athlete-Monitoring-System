@@ -14,6 +14,7 @@ app.use(
     origin: [
       "http://localhost:5173", // untuk dev lokal
       "https://athlete-monitoring-system-aw7l.vercel.app", // ganti dengan domain Vercel-mu
+      "https://athlete-monitoring-system-aw7l-git-main-yanardrognuhs-projects.vercel.app",
     ],
     credentials: true,
   })
