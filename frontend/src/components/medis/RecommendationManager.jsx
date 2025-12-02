@@ -86,7 +86,7 @@ export default function RecommendationManager() {
   };
 
   const handleAddRule = () => {
-    const newId = Math.max(...recommendationRules.map((r) => r.id), 0) + 1;
+    const newId = Date.now(); // temporary ID, unik di client
     setRecommendationRules([
       ...recommendationRules,
       {
@@ -94,6 +94,7 @@ export default function RecommendationManager() {
         priority: recommendationRules.length + 1,
         trigger_condition: '{"Cedera": ">=7"}',
         recommendation_text: "",
+        isNew: true, // 👈 TANDAI INI SEBAGAI BARU
       },
     ]);
   };
@@ -112,23 +113,39 @@ export default function RecommendationManager() {
         )
       );
 
-      // Save recommendation rules
-      await Promise.all(
-        recommendationRules.map((rule) =>
-          rule.id > 0 && rule.id <= recommendationRules.length
-            ? teamAPI.updateRecommendationRule(
-                rule.id,
-                rule.priority,
-                rule.trigger_condition,
-                rule.recommendation_text
-              )
-            : teamAPI.createRecommendationRule(
-                rule.priority,
-                rule.trigger_condition,
-                rule.recommendation_text
-              )
-        )
+      // Simpan rules
+      const savePromises = recommendationRules.map((rule) => {
+        if (rule.isNew) {
+          return teamAPI.createRecommendationRule(
+            rule.priority,
+            rule.trigger_condition,
+            rule.recommendation_text
+          );
+        } else {
+          return teamAPI.updateRecommendationRule(
+            rule.id,
+            rule.priority,
+            rule.trigger_condition,
+            rule.recommendation_text
+          );
+        }
+      });
+
+      await Promise.all(savePromises);
+
+      // 🔁 SETELAH SUKSES, FETCH ULANG DATA AGAR STATE KONSISTEN
+      const [weightsRes, rulesRes] = await Promise.all([
+        teamAPI.getCriteriaWeights(),
+        teamAPI.getRecommendationRules(),
+      ]);
+
+      setCriteriaWeights(
+        weightsRes.data.map((w) => ({
+          ...w,
+          weight: Math.round(w.weight * 100),
+        }))
       );
+      setRecommendationRules(rulesRes.data); // <-- ini akan hapus semua temporary state
 
       addToast("Recommendation system updated successfully!", "success");
     } catch (err) {
