@@ -1,7 +1,6 @@
 const jwt = require("jsonwebtoken");
-
-const JWT_SECRET =
-  process.env.JWT_SECRET || "your-secret-key-change-in-production";
+const { JWT_SECRET } = require("../utils/config");
+const logger = require("../utils/logger");
 
 // Middleware to verify JWT token
 function authenticateToken(req, res, next) {
@@ -12,13 +11,25 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ error: "Access token required" });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: "Invalid or expired token" });
-    }
-    req.user = user;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET, {
+      issuer: 'athlete-monitoring-system',
+      audience: 'athlete-monitoring-users'
+    });
+    req.user = decoded;
     next();
-  });
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      logger.warn('Token expired', { userId: err.expiredAt });
+      return res.status(401).json({ error: "Token expired" });
+    }
+    if (err.name === 'JsonWebTokenError') {
+      logger.warn('Invalid token', { error: err.message });
+      return res.status(403).json({ error: "Invalid token" });
+    }
+    logger.error('Token verification error:', err);
+    return res.status(403).json({ error: "Token verification failed" });
+  }
 }
 
 // Middleware to check user role
@@ -29,6 +40,7 @@ function authorizeRole(...allowedRoles) {
     }
 
     if (!allowedRoles.includes(req.user.role)) {
+      logger.warn(`Unauthorized access attempt by user ${req.user.email}, role: ${req.user.role}`);
       return res.status(403).json({
         error: `Access denied. Required role: ${allowedRoles.join(" or ")}`,
       });
