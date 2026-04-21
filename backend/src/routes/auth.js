@@ -3,37 +3,39 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { db } = require("../database/init");
 const { JWT_SECRET } = require("../middleware/auth");
+const { validateLogin, validateRegister } = require("../middleware/validators");
+const logger = require("../utils/logger");
 
 const router = express.Router();
 
 // Login
-router.post("/login", (req, res) => {
+router.post("/login", validateLogin, (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: "Email and password required" });
-    }
+    logger.info(`Login attempt for email: ${email}`);
 
-    // Find user
-    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+    // Find user with team info
+    const user = db.prepare(`
+      SELECT u.*, t.name as team_name 
+      FROM users u 
+      JOIN teams t ON u.team_id = t.id 
+      WHERE u.email = ?
+    `).get(email);
 
     if (!user) {
+      logger.warn(`Login failed - user not found: ${email}`);
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
     // Verify password
     const isValidPassword = bcrypt.compareSync(password, user.password);
     if (!isValidPassword) {
+      logger.warn(`Login failed - invalid password for: ${email}`);
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // Get team info
-    const team = db
-      .prepare("SELECT name FROM teams WHERE id = ?")
-      .get(user.team_id);
-
-    // Generate JWT token
+    // Generate JWT token with secure configuration
     const token = jwt.sign(
       {
         id: user.id,
@@ -42,8 +44,14 @@ router.post("/login", (req, res) => {
         teamId: user.team_id,
       },
       JWT_SECRET,
-      { expiresIn: "24h" }
+      { 
+        expiresIn: process.env.JWT_EXPIRATION || "24h",
+        issuer: 'athlete-monitoring-system',
+        audience: 'athlete-monitoring-users'
+      }
     );
+
+    logger.info(`Login successful for: ${email}`);
 
     res.json({
       token,
@@ -53,28 +61,21 @@ router.post("/login", (req, res) => {
         email: user.email,
         role: user.role,
         teamId: user.team_id,
-        teamName: team?.name,
+        teamName: user.team_name,
       },
     });
   } catch (error) {
-    console.error(error);
+    logger.error('Login error:', error);
     res.status(500).json({ error: "Login failed" });
   }
 });
 
 // Register (optional - for creating new users)
-router.post("/register", (req, res) => {
+router.post("/register", validateRegister, (req, res) => {
   try {
     const { name, email, password, role, teamId } = req.body;
 
-    if (!name || !email || !password || !role || !teamId) {
-      return res.status(400).json({ error: "All fields required" });
-    }
-
-    // Validate role
-    if (!["medis", "pelatih"].includes(role)) {
-      return res.status(400).json({ error: "Invalid role" });
-    }
+    logger.info(`Registration attempt for email: ${email}`);
 
     // Check if email already exists
     const existingUser = db
@@ -82,11 +83,13 @@ router.post("/register", (req, res) => {
       .get(email);
 
     if (existingUser) {
+      logger.warn(`Registration failed - email already exists: ${email}`);
       return res.status(400).json({ error: "Email already registered" });
     }
 
-    // Hash password
-    const hashedPassword = bcrypt.hashSync(password, 10);
+    // Hash password with configurable rounds
+    const bcryptRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+    const hashedPassword = bcrypt.hashSync(password, bcryptRounds);
 
     // Insert user
     const result = db
@@ -96,12 +99,14 @@ router.post("/register", (req, res) => {
       )
       .run(name, email, hashedPassword, role, teamId);
 
+    logger.info(`User registered successfully: ${email} (ID: ${result.lastInsertRowid})`);
+
     res.status(201).json({
       message: "User registered successfully",
       userId: result.lastInsertRowid,
     });
   } catch (error) {
-    console.error(error);
+    logger.error('Registration error:', error);
     res.status(500).json({ error: "Registration failed" });
   }
 });
