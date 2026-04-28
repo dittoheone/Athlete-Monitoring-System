@@ -1,14 +1,39 @@
 ```
+# Environment variables
+.env
+.env.local
+.env.*
+
 # Logs
 *.log
 backend/logs/
 
-# Environment variables
-.env
-
 # Dependencies
 node_modules/
 
+# Database
+backend/database.db
+
+# Build artifacts
+dist/
+build/
+target/
+
 # Temporary files
 *.tmp
+*.swp
+*.swo
+
+# Cache directories
+.cache/
+__pycache__/
+*.pyc
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE specific
+.vscode/
+.idea/
 ```
