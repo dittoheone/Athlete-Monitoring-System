@@ -9,6 +9,7 @@
     "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install"
   },
   "devDependencies": {
+    "baseline-browser-mapping": "^2.10.24",
     "concurrently": "^9.2.1"
   }
 }

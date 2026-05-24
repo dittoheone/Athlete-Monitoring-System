@@ -6,24 +6,24 @@ const router = express.Router();
 router.use(authenticateToken);
 
 // Get holistic recommendations for an athlete
-router.get("/athlete/:athleteId", (req, res) => {
+router.get("/athlete/:athleteId", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
     // Verify athlete belongs to user's team
-    const athlete = queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
 
     // Get rule-based recommendations
-    const ruleRecommendations = queries.evaluateRecommendations(
+    const ruleRecommendations = await queries.evaluateRecommendations(
       athleteId,
       req.user.teamId
     );
 
     // Get training recommendations
-    const trainingRecommendations = queries.generateTrainingRecommendations(
+    const trainingRecommendations = await queries.generateTrainingRecommendations(
       athleteId,
       req.user.teamId
     );
@@ -45,16 +45,16 @@ router.get("/athlete/:athleteId", (req, res) => {
 });
 
 // Create training program from suggestion (Medical only)
-router.post("/training-program", (req, res) => {
+router.post("/training-program", async (req, res) => {
   try {
     const { athleteId, exerciseId, ...programData } = req.body;
 
-    const athlete = queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
 
-    const programId = queries.createTrainingProgram(
+    const programId = await queries.createTrainingProgram(
       athleteId,
       exerciseId,
       programData
@@ -71,18 +71,18 @@ router.post("/training-program", (req, res) => {
 });
 
 // Get auto-generated exercise recommendations for an athlete
-router.get("/training/:athleteId", (req, res) => {
+router.get("/training/:athleteId", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
     // Verify athlete belongs to user's team
-    const athlete = queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
 
     // Get criteria weights for athlete's position
-    const weights = queries.getCriteriaWeightsByPosition(athlete.position);
+    const weights = await queries.getCriteriaWeightsByPosition(athlete.position);
     if (!weights || weights.length === 0) {
       return res
         .status(404)
@@ -90,7 +90,7 @@ router.get("/training/:athleteId", (req, res) => {
     }
 
     // Get all exercises
-    const exercises = queries.getExercises();
+    const exercises = await queries.getExercises();
 
     // Score exercises based on focus_area match
     const scoredExercises = exercises.map((ex) => {

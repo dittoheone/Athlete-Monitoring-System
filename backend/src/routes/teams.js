@@ -1,5 +1,5 @@
 const express = require("express");
-const { db } = require("../database/init");
+const { pool } = require("../database/init");
 const { authenticateToken, authorizeRole } = require("../middleware/auth");
 const queries = require("../database/queries");
 const teamRouter = express.Router();
@@ -7,10 +7,10 @@ const teamRouter = express.Router();
 teamRouter.use(authenticateToken);
 
 // Get all teams
-teamRouter.get("/", (req, res) => {
+teamRouter.get("/", async (req, res) => {
   try {
-    const teams = db.prepare("SELECT * FROM teams").all();
-    res.json(teams);
+    const result = await pool.query("SELECT * FROM teams");
+    res.json(result.rows);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch teams" });
@@ -18,15 +18,15 @@ teamRouter.get("/", (req, res) => {
 });
 
 // Get user's team details
-teamRouter.get("/my-team", (req, res) => {
+teamRouter.get("/my-team", async (req, res) => {
   try {
-    const team = queries.getTeamById(req.user.teamId);
+    const team = await queries.getTeamById(req.user.teamId);
     if (!team) {
       return res.status(404).json({ error: "Team not found" });
     }
 
-    const members = queries.getTeamMembers(req.user.teamId);
-    const athleteCount = queries.getTeamAthleteCount(req.user.teamId);
+    const members = await queries.getTeamMembers(req.user.teamId);
+    const athleteCount = await queries.getTeamAthleteCount(req.user.teamId);
 
     res.json({
       ...team,
@@ -40,9 +40,9 @@ teamRouter.get("/my-team", (req, res) => {
 });
 
 // Get team overview for dashboard
-teamRouter.get("/overview", (req, res) => {
+teamRouter.get("/overview", async (req, res) => {
   try {
-    const athletes = queries.getTeamOverview(req.user.teamId);
+    const athletes = await queries.getTeamOverview(req.user.teamId);
 
     // Get status distribution
     const statusCounts = {
@@ -67,20 +67,20 @@ teamRouter.get("/overview", (req, res) => {
     });
 
     // Calculate team average physical score
-    const recentAssessments = db
-      .prepare(
-        `
+    const recentAssessmentsResult = await pool.query(
+      `
         SELECT DISTINCT ON (a.athlete_id) 
           am.value
         FROM assessments a
         JOIN assessment_metrics am ON a.id = am.assessment_id
         JOIN athletes ath ON a.athlete_id = ath.id
-        WHERE ath.team_id = ? 
+        WHERE ath.team_id = $1 
           AND am.metric_category = 'Pemeriksaan Fisik'
         ORDER BY a.athlete_id, a.date DESC
-      `
-      )
-      .all(req.user.teamId);
+      `,
+      [req.user.teamId]
+    );
+    const recentAssessments = recentAssessmentsResult.rows;
 
     const avgTeamFitness =
       recentAssessments.length > 0
@@ -111,9 +111,9 @@ teamRouter.get("/overview", (req, res) => {
 });
 
 // Get criteria weights (Medical team only)
-teamRouter.get("/criteria-weights", authorizeRole("medis"), (req, res) => {
+teamRouter.get("/criteria-weights", authorizeRole("medis"), async (req, res) => {
   try {
-    const criteriaWeights = queries.getAllCriteriaWeights();
+    const criteriaWeights = await queries.getAllCriteriaWeights();
     res.json(criteriaWeights);
   } catch (error) {
     console.error(error);
@@ -122,7 +122,7 @@ teamRouter.get("/criteria-weights", authorizeRole("medis"), (req, res) => {
 });
 
 // Update criteria weight (Medical team only)
-teamRouter.put("/criteria-weights/:id", authorizeRole("medis"), (req, res) => {
+teamRouter.put("/criteria-weights/:id", authorizeRole("medis"), async (req, res) => {
   try {
     const { weight } = req.body;
     const { id } = req.params;
@@ -133,8 +133,8 @@ teamRouter.put("/criteria-weights/:id", authorizeRole("medis"), (req, res) => {
         .json({ error: "Invalid weight value. Must be between 0 and 1." });
     }
 
-    const result = queries.updateCriteriaWeight(id, weight);
-    if (result.changes === 0) {
+    const result = await queries.updateCriteriaWeight(id, weight);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: "Criteria weight not found" });
     }
 
@@ -146,9 +146,9 @@ teamRouter.put("/criteria-weights/:id", authorizeRole("medis"), (req, res) => {
 });
 
 // Get recommendation rules (Medical team only)
-teamRouter.get("/recommendation-rules", authorizeRole("medis"), (req, res) => {
+teamRouter.get("/recommendation-rules", authorizeRole("medis"), async (req, res) => {
   try {
-    const rules = queries.getRecommendationRules();
+    const rules = await queries.getRecommendationRules();
     res.json(rules);
   } catch (error) {
     console.error(error);
@@ -157,7 +157,7 @@ teamRouter.get("/recommendation-rules", authorizeRole("medis"), (req, res) => {
 });
 
 // Create recommendation rule (Medical team only)
-teamRouter.post("/recommendation-rules", authorizeRole("medis"), (req, res) => {
+teamRouter.post("/recommendation-rules", authorizeRole("medis"), async (req, res) => {
   try {
     const { priority, triggerCondition, recommendationText } = req.body;
 
@@ -168,14 +168,15 @@ teamRouter.post("/recommendation-rules", authorizeRole("medis"), (req, res) => {
       });
     }
 
-    const result = queries.createRecommendationRule(
+    const newRule = await queries.createRecommendationRule(
       priority,
       triggerCondition,
       recommendationText
     );
+    
     res.status(201).json({
       message: "Recommendation rule created successfully",
-      ruleId: result.lastInsertRowid,
+      ruleId: newRule.id,
     });
   } catch (error) {
     console.error(error);
@@ -187,7 +188,7 @@ teamRouter.post("/recommendation-rules", authorizeRole("medis"), (req, res) => {
 teamRouter.put(
   "/recommendation-rules/:id",
   authorizeRole("medis"),
-  (req, res) => {
+  async (req, res) => {
     try {
       const { id } = req.params;
       const { priority, triggerCondition, recommendationText } = req.body;
@@ -199,13 +200,14 @@ teamRouter.put(
         });
       }
 
-      const result = queries.updateRecommendationRule(
+      const result = await queries.updateRecommendationRule(
         id,
         priority,
         triggerCondition,
         recommendationText
       );
-      if (result.changes === 0) {
+      
+      if (result.rowCount === 0) {
         return res.status(404).json({ error: "Recommendation rule not found" });
       }
 
@@ -221,11 +223,12 @@ teamRouter.put(
 teamRouter.delete(
   "/recommendation-rules/:id",
   authorizeRole("medis"),
-  (req, res) => {
+  async (req, res) => {
     try {
       const { id } = req.params;
-      const result = queries.deleteRecommendationRule(id);
-      if (result.changes === 0) {
+      const result = await queries.deleteRecommendationRule(id);
+      
+      if (result.rowCount === 0) {
         return res.status(404).json({ error: "Recommendation rule not found" });
       }
 

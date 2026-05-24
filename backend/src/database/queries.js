@@ -1,182 +1,178 @@
-const { db } = require("./init");
+const { pool } = require("./init");
 
 // Athlete queries
-const getAthleteById = (athleteId, teamId) => {
-  return db
-    .prepare(
-      `
+const getAthleteById = async (athleteId, teamId) => {
+  const result = await pool.query(
+    `
       SELECT a.*, t.name as team_name
       FROM athletes a
       JOIN teams t ON a.team_id = t.id
-      WHERE a.id = ? AND a.team_id = ?
-    `
-    )
-    .get(athleteId, teamId);
+      WHERE a.id = $1 AND a.team_id = $2
+    `,
+    [athleteId, teamId]
+  );
+  return result.rows[0];
 };
 
-const getAthletesByTeam = (teamId) => {
-  return db
-    .prepare(
-      `
+const getAthletesByTeam = async (teamId) => {
+  const result = await pool.query(
+    `
       SELECT * FROM athletes 
-      WHERE team_id = ? 
+      WHERE team_id = $1 
       ORDER BY name
-    `
-    )
-    .all(teamId);
+    `,
+    [teamId]
+  );
+  return result.rows;
 };
 
-const createAthlete = (teamId, name, position) => {
-  return db
-    .prepare(
-      `
+const createAthlete = async (teamId, name, position) => {
+  const result = await pool.query(
+    `
       INSERT INTO athletes (team_id, name, position, status) 
-      VALUES (?, ?, ?, 'Fit')
-    `
-    )
-    .run(teamId, name, position);
+      VALUES ($1, $2, $3, 'Fit')
+      RETURNING id
+    `,
+    [teamId, name, position]
+  );
+  return result.rows[0];
 };
 
-const updateAthlete = (athleteId, updates) => {
+const updateAthlete = async (athleteId, updates) => {
   const updateFields = Object.keys(updates);
   if (updateFields.length === 0) return null;
 
-  const setClause = updateFields.map((field) => `${field} = ?`).join(", ");
+  const setClause = updateFields.map((field, i) => `${field} = $${i + 1}`).join(", ");
   const values = [...updateFields.map((field) => updates[field]), athleteId];
 
-  return db
-    .prepare(`UPDATE athletes SET ${setClause} WHERE id = ?`)
-    .run(...values);
+  const result = await pool.query(`UPDATE athletes SET ${setClause} WHERE id = $${values.length}`, values);
+  return result;
 };
 
-const deleteAthlete = (athleteId, teamId) => {
-  return db
-    .prepare("DELETE FROM athletes WHERE id = ? AND team_id = ?")
-    .run(athleteId, teamId);
+const deleteAthlete = async (athleteId, teamId) => {
+  const result = await pool.query("DELETE FROM athletes WHERE id = $1 AND team_id = $2", [athleteId, teamId]);
+  return result;
 };
 
 // Assessment queries
-const getAssessmentsByAthlete = (athleteId, teamId) => {
-  const assessments = db
-    .prepare(
-      `
+const getAssessmentsByAthlete = async (athleteId, teamId) => {
+  const assessmentsResult = await pool.query(
+    `
       SELECT a.*, u.name as assessor_name
       FROM assessments a
       JOIN users u ON a.user_id = u.id
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
-    `
-    )
-    .all(athleteId, teamId);
+    `,
+    [athleteId, teamId]
+  );
 
-  return assessments.map((assessment) => ({
-    ...assessment,
-    metrics: db
-      .prepare(
-        `
+  const assessments = assessmentsResult.rows;
+
+  for (let i = 0; i < assessments.length; i++) {
+    const metricsResult = await pool.query(
+      `
         SELECT metric_category, metric_name, value
         FROM assessment_metrics
-        WHERE assessment_id = ?
-      `
-      )
-      .all(assessment.id),
-  }));
+        WHERE assessment_id = $1
+      `,
+      [assessments[i].id]
+    );
+    assessments[i].metrics = metricsResult.rows;
+  }
+
+  return assessments;
 };
 
-const getAssessmentById = (assessmentId, teamId) => {
-  const assessment = db
-    .prepare(
-      `
+const getAssessmentById = async (assessmentId, teamId) => {
+  const assessmentResult = await pool.query(
+    `
       SELECT a.*, u.name as assessor_name, ath.name as athlete_name
       FROM assessments a
       JOIN users u ON a.user_id = u.id
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.id = ? AND ath.team_id = ?
-    `
-    )
-    .get(assessmentId, teamId);
+      WHERE a.id = $1 AND ath.team_id = $2
+    `,
+    [assessmentId, teamId]
+  );
 
+  const assessment = assessmentResult.rows[0];
   if (!assessment) return null;
 
-  return {
-    ...assessment,
-    metrics: db
-      .prepare(
-        `
-        SELECT metric_category, metric_name, value
-        FROM assessment_metrics
-        WHERE assessment_id = ?
-      `
-      )
-      .all(assessmentId),
-  };
+  const metricsResult = await pool.query(
+    `
+      SELECT metric_category, metric_name, value
+      FROM assessment_metrics
+      WHERE assessment_id = $1
+    `,
+    [assessmentId]
+  );
+  
+  assessment.metrics = metricsResult.rows;
+  return assessment;
 };
 
-const createAssessment = (athleteId, userId, date, weight, notes, metrics) => {
-  const insertAssessment = db.prepare(`
-    INSERT INTO assessments (athlete_id, user_id, date, weight_kg, notes)
-    VALUES (?, ?, ?, ?, ?)
-  `);
+const createAssessment = async (athleteId, userId, date, weight, notes, metrics) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const insertAssessmentResult = await client.query(`
+      INSERT INTO assessments (athlete_id, user_id, date, weight_kg, notes)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+    `, [athleteId, userId, date, weight || null, notes || null]);
+    
+    const assessmentId = insertAssessmentResult.rows[0].id;
 
-  const insertMetric = db.prepare(`
-    INSERT INTO assessment_metrics (assessment_id, metric_category, metric_name, value)
-    VALUES (?, ?, ?, ?)
-  `);
+    for (const [category, categoryMetrics] of Object.entries(metrics)) {
+      for (const [metricName, value] of Object.entries(categoryMetrics)) {
+        await client.query(`
+          INSERT INTO assessment_metrics (assessment_id, metric_category, metric_name, value)
+          VALUES ($1, $2, $3, $4)
+        `, [assessmentId, category, metricName, value]);
+      }
+    }
 
-  const updateAthlete = db.prepare(`
-    UPDATE athletes 
-    SET last_assessment_date = ?, status = ?
-    WHERE id = ?
-  `);
-
-  const transaction = db.transaction(() => {
-    const result = insertAssessment.run(
-      athleteId,
-      userId,
-      date,
-      weight || null,
-      notes || null
-    );
-    const assessmentId = result.lastInsertRowid;
-
-    // Insert all metrics
-    Object.entries(metrics).forEach(([category, categoryMetrics]) => {
-      Object.entries(categoryMetrics).forEach(([metricName, value]) => {
-        insertMetric.run(assessmentId, category, metricName, value);
-      });
-    });
-
-    // Calculate overall status based on metrics
     const status = calculateAthleteStatus(metrics);
-    updateAthlete.run(date, status, athleteId);
+    await client.query(`
+      UPDATE athletes 
+      SET last_assessment_date = $1, status = $2
+      WHERE id = $3
+    `, [date, status, athleteId]);
 
+    await client.query('COMMIT');
     return assessmentId;
-  });
-
-  return transaction();
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 };
 
 // Exercise queries
-const getExercises = () => {
-  return db.prepare("SELECT * FROM exercise_library ORDER BY name").all();
+const getExercises = async () => {
+  const result = await pool.query("SELECT * FROM exercise_library ORDER BY name");
+  return result.rows;
 };
 
-const createExercise = (name, type, focusArea, description) => {
-  return db
-    .prepare(
-      `
-      INSERT INTO exercise_library (name, type, focus_area, description)
-      VALUES (?, ?, ?, ?)
+const createExercise = async (name, type, focusArea, description) => {
+  const result = await pool.query(
     `
-    )
-    .run(name, type, focusArea, description || null);
+      INSERT INTO exercise_library (name, type, focus_area, description)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `,
+    [name, type, focusArea, description || null]
+  );
+  return result.rows[0];
 };
 
-const getTrainingProgramsByAthlete = (athleteId, teamId) => {
-  return db
-    .prepare(
-      `
+const getTrainingProgramsByAthlete = async (athleteId, teamId) => {
+  const result = await pool.query(
+    `
       SELECT 
         tp.*,
         el.name as exercise_name,
@@ -185,13 +181,14 @@ const getTrainingProgramsByAthlete = (athleteId, teamId) => {
       FROM training_programs tp
       JOIN exercise_library el ON tp.exercise_id = el.id
       JOIN athletes a ON tp.athlete_id = a.id
-      WHERE tp.athlete_id = ? AND a.team_id = ?
-    `
-    )
-    .all(athleteId, teamId);
+      WHERE tp.athlete_id = $1 AND a.team_id = $2
+    `,
+    [athleteId, teamId]
+  );
+  return result.rows;
 };
 
-const createTrainingProgram = (athleteId, exerciseId, programData) => {
+const createTrainingProgram = async (athleteId, exerciseId, programData) => {
   const {
     frequency,
     intensity,
@@ -202,15 +199,14 @@ const createTrainingProgram = (athleteId, exerciseId, programData) => {
     sets,
     reps,
   } = programData;
-  return db
-    .prepare(
-      `
+  const result = await pool.query(
+    `
       INSERT INTO training_programs 
       (athlete_id, exercise_id, frequency, intensity, time, type_fitt, volume, progression, sets, reps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-    )
-    .run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id
+    `,
+    [
       athleteId,
       exerciseId,
       frequency,
@@ -221,40 +217,43 @@ const createTrainingProgram = (athleteId, exerciseId, programData) => {
       progression,
       sets,
       reps
-    );
+    ]
+  );
+  return result.rows[0].id;
 };
 
 // Team queries
-const getTeamById = (teamId) => {
-  return db.prepare("SELECT * FROM teams WHERE id = ?").get(teamId);
+const getTeamById = async (teamId) => {
+  const result = await pool.query("SELECT * FROM teams WHERE id = $1", [teamId]);
+  return result.rows[0];
 };
 
-const getTeamMembers = (teamId) => {
-  return db
-    .prepare(
-      `
+const getTeamMembers = async (teamId) => {
+  const result = await pool.query(
+    `
       SELECT id, name, email, role 
       FROM users 
-      WHERE team_id = ?
-    `
-    )
-    .all(teamId);
+      WHERE team_id = $1
+    `,
+    [teamId]
+  );
+  return result.rows;
 };
 
-const getTeamAthleteCount = (teamId) => {
-  return db
-    .prepare(
-      `
+const getTeamAthleteCount = async (teamId) => {
+  const result = await pool.query(
+    `
       SELECT COUNT(*) as count 
       FROM athletes 
-      WHERE team_id = ?
-    `
-    )
-    .get(teamId);
+      WHERE team_id = $1
+    `,
+    [teamId]
+  );
+  return result.rows[0];
 };
 
 // Dashboard queries
-const getAthletePerformanceData = (
+const getAthletePerformanceData = async (
   athleteId,
   teamId,
   category = null,
@@ -268,124 +267,121 @@ const getAthletePerformanceData = (
       am.value
     FROM assessments a
     JOIN assessment_metrics am ON a.id = am.assessment_id
-    WHERE a.athlete_id = ?
+    WHERE a.athlete_id = $1
   `;
   const params = [athleteId];
+  let paramCount = 2;
 
   if (category) {
-    query += " AND am.metric_category = ?";
+    query += ` AND am.metric_category = $${paramCount++}`;
     params.push(category);
   }
   if (metric) {
-    query += " AND am.metric_name = ?";
+    query += ` AND am.metric_name = $${paramCount++}`;
     params.push(metric);
   }
   query += " ORDER BY a.date ASC";
 
-  return db.prepare(query).all(...params);
+  const result = await pool.query(query, params);
+  return result.rows;
 };
 
-const getLatestPhysicalAssessment = (athleteId, teamId) => {
-  const latestAssessment = db
-    .prepare(
-      `
+const getLatestPhysicalAssessment = async (athleteId, teamId) => {
+  const latestResult = await pool.query(
+    `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-    )
-    .get(athleteId, teamId);
-
+    `,
+    [athleteId, teamId]
+  );
+  
+  const latestAssessment = latestResult.rows[0];
   if (!latestAssessment) return null;
 
-  const metrics = db
-    .prepare(
-      `
+  const metricsResult = await pool.query(
+    `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Pemeriksaan Fisik'
-    `
-    )
-    .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Pemeriksaan Fisik'
+    `,
+    [latestAssessment.id]
+  );
 
-  return { latestAssessment, metrics };
+  return { latestAssessment, metrics: metricsResult.rows };
 };
 
-const getLatestMentalAssessment = (athleteId, teamId) => {
-  const latestAssessment = db
-    .prepare(
-      `
+const getLatestMentalAssessment = async (athleteId, teamId) => {
+  const latestResult = await pool.query(
+    `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-    )
-    .get(athleteId, teamId);
-
+    `,
+    [athleteId, teamId]
+  );
+  
+  const latestAssessment = latestResult.rows[0];
   if (!latestAssessment) return null;
 
-  const metrics = db
-    .prepare(
-      `
+  const metricsResult = await pool.query(
+    `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Kesehatan Mental'
-    `
-    )
-    .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Kesehatan Mental'
+    `,
+    [latestAssessment.id]
+  );
 
-  return { latestAssessment, metrics };
+  return { latestAssessment, metrics: metricsResult.rows };
 };
 
-const getLatestSleepAssessment = (athleteId, teamId) => {
-  const latestAssessment = db
-    .prepare(
-      `
+const getLatestSleepAssessment = async (athleteId, teamId) => {
+  const latestResult = await pool.query(
+    `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-    )
-    .get(athleteId, teamId);
-
+    `,
+    [athleteId, teamId]
+  );
+  
+  const latestAssessment = latestResult.rows[0];
   if (!latestAssessment) return null;
 
-  const metrics = db
-    .prepare(
-      `
+  const metricsResult = await pool.query(
+    `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Kualitas Tidur'
-    `
-    )
-    .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Kualitas Tidur'
+    `,
+    [latestAssessment.id]
+  );
 
-  return { latestAssessment, metrics };
+  return { latestAssessment, metrics: metricsResult.rows };
 };
 
-const getTeamOverview = (teamId) => {
-  const athletes = db
-    .prepare(
-      `
+const getTeamOverview = async (teamId) => {
+  const result = await pool.query(
+    `
       SELECT 
         id, name, position, status, last_assessment_date
       FROM athletes
-      WHERE team_id = ?
+      WHERE team_id = $1
       ORDER BY name
-    `
-    )
-    .all(teamId);
-
-  return athletes;
+    `,
+    [teamId]
+  );
+  return result.rows;
 };
 
 // Helper functions
@@ -394,7 +390,6 @@ function calculateAthleteStatus(metrics) {
   const mental = metrics["Kesehatan Mental"] || {};
   const rehab = metrics["Rehabilitasi"] || {};
 
-  // Check if in rehabilitation
   if (rehab.Cedera && rehab.Cedera >= 7) {
     return "Rehabilitasi";
   }
@@ -402,7 +397,6 @@ function calculateAthleteStatus(metrics) {
     return "Pemulihan";
   }
 
-  // Calculate average physical score
   const physicalValues = Object.values(physical);
   const mentalValues = Object.values(mental);
   const avgPhysical =
@@ -414,123 +408,116 @@ function calculateAthleteStatus(metrics) {
       ? mentalValues.reduce((a, b) => a + b, 0) / mentalValues.length
       : 5;
 
-  // Determine status
   if (avgPhysical >= 8 && avgMental >= 8) return "Prima";
   if (avgPhysical >= 6 && avgMental >= 6) return "Fit";
   return "Pemulihan";
 }
 
 // Criteria and recommendation queries
-const getCriteriaWeightsByPosition = (position) => {
-  return db
-    .prepare(
-      `
+const getCriteriaWeightsByPosition = async (position) => {
+  const result = await pool.query(
+    `
       SELECT criteria_name, weight
       FROM criteria_weights
-      WHERE position = ?
+      WHERE position = $1
       ORDER BY criteria_name
-    `
-    )
-    .all(position);
+    `,
+    [position]
+  );
+  return result.rows;
 };
 
-const getAllCriteriaWeights = () => {
-  return db
-    .prepare("SELECT * FROM criteria_weights ORDER BY position, criteria_name")
-    .all();
+const getAllCriteriaWeights = async () => {
+  const result = await pool.query("SELECT * FROM criteria_weights ORDER BY position, criteria_name");
+  return result.rows;
 };
 
-const updateCriteriaWeight = (id, weight) => {
-  return db
-    .prepare("UPDATE criteria_weights SET weight = ? WHERE id = ?")
-    .run(weight, id);
+const updateCriteriaWeight = async (id, weight) => {
+  const result = await pool.query("UPDATE criteria_weights SET weight = $1 WHERE id = $2", [weight, id]);
+  return result;
 };
 
-const getRecommendationRules = () => {
-  return db
-    .prepare("SELECT * FROM recommendation_rules ORDER BY priority")
-    .all();
+const getRecommendationRules = async () => {
+  const result = await pool.query("SELECT * FROM recommendation_rules ORDER BY priority");
+  return result.rows;
 };
 
-const createRecommendationRule = (
+const createRecommendationRule = async (
   priority,
   triggerCondition,
   recommendationText
 ) => {
-  return db
-    .prepare(
-      `
-      INSERT INTO recommendation_rules (priority, trigger_condition, recommendation_text)
-      VALUES (?, ?, ?)
+  const result = await pool.query(
     `
-    )
-    .run(priority, triggerCondition, recommendationText);
+      INSERT INTO recommendation_rules (priority, trigger_condition, recommendation_text)
+      VALUES ($1, $2, $3)
+      RETURNING id
+    `,
+    [priority, triggerCondition, recommendationText]
+  );
+  return result.rows[0];
 };
 
-const updateRecommendationRule = (
+const updateRecommendationRule = async (
   id,
   priority,
   triggerCondition,
   recommendationText
 ) => {
-  return db
-    .prepare(
-      `
-      UPDATE recommendation_rules 
-      SET priority = ?, trigger_condition = ?, recommendation_text = ?
-      WHERE id = ?
+  const result = await pool.query(
     `
-    )
-    .run(priority, triggerCondition, recommendationText, id);
+      UPDATE recommendation_rules 
+      SET priority = $1, trigger_condition = $2, recommendation_text = $3
+      WHERE id = $4
+    `,
+    [priority, triggerCondition, recommendationText, id]
+  );
+  return result;
 };
 
-const deleteRecommendationRule = (id) => {
-  return db.prepare("DELETE FROM recommendation_rules WHERE id = ?").run(id);
+const deleteRecommendationRule = async (id) => {
+  const result = await pool.query("DELETE FROM recommendation_rules WHERE id = $1", [id]);
+  return result;
 };
 
 // Evaluate recommendation rules against athlete's latest metrics
-function evaluateRecommendations(athleteId, teamId) {
-  // Get latest assessment metrics
-  const latestAssessment = db
-    .prepare(
-      `
+async function evaluateRecommendations(athleteId, teamId) {
+  const latestAssessmentResult = await pool.query(
+    `
       SELECT id FROM assessments 
-      WHERE athlete_id = ? 
+      WHERE athlete_id = $1 
       ORDER BY date DESC 
       LIMIT 1
-    `
-    )
-    .get(athleteId);
-
+    `,
+    [athleteId]
+  );
+  
+  const latestAssessment = latestAssessmentResult.rows[0];
   if (!latestAssessment) return [];
 
-  const metrics = db
-    .prepare(
-      `
+  const metricsResult = await pool.query(
+    `
       SELECT metric_category, metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ?
-    `
-    )
-    .all(latestAssessment.id);
+      WHERE assessment_id = $1
+    `,
+    [latestAssessment.id]
+  );
+  const metrics = metricsResult.rows;
 
-  // Convert to lookup object: { "Cedera": 8, "Fleksibilitas": 6, ... }
   const metricMap = {};
   metrics.forEach((m) => {
     metricMap[m.metric_name] = m.value;
   });
 
-  // Get all rules
-  const rules = getRecommendationRules();
-
-  // Evaluate each rule
+  const rules = await getRecommendationRules();
   const matchedRecommendations = [];
+  
   rules.forEach((rule) => {
     try {
       const condition = JSON.parse(rule.trigger_condition);
       let matches = true;
 
-      // Simple condition format: { "Cedera": ">=7", "Fleksibilitas": "<5" }
       Object.entries(condition).forEach(([metricName, expression]) => {
         const actualValue = metricMap[metricName];
         if (actualValue === undefined) {
@@ -538,32 +525,17 @@ function evaluateRecommendations(athleteId, teamId) {
           return;
         }
 
-        // Parse expression like ">=7", "<5", "==8"
         const operator = expression.match(/^[<>=!]+/)?.[0] || "==";
         const threshold = parseFloat(expression.replace(/^[<>=!]+/, ""));
 
         switch (operator) {
-          case ">=":
-            if (!(actualValue >= threshold)) matches = false;
-            break;
-          case ">":
-            if (!(actualValue > threshold)) matches = false;
-            break;
-          case "<=":
-            if (!(actualValue <= threshold)) matches = false;
-            break;
-          case "<":
-            if (!(actualValue < threshold)) matches = false;
-            break;
-          case "==":
-          case "=":
-            if (!(actualValue === threshold)) matches = false;
-            break;
-          case "!=":
-            if (!(actualValue !== threshold)) matches = false;
-            break;
-          default:
-            matches = false;
+          case ">=": if (!(actualValue >= threshold)) matches = false; break;
+          case ">": if (!(actualValue > threshold)) matches = false; break;
+          case "<=": if (!(actualValue <= threshold)) matches = false; break;
+          case "<": if (!(actualValue < threshold)) matches = false; break;
+          case "==": case "=": if (!(actualValue === threshold)) matches = false; break;
+          case "!=": if (!(actualValue !== threshold)) matches = false; break;
+          default: matches = false;
         }
       });
 
@@ -574,44 +546,32 @@ function evaluateRecommendations(athleteId, teamId) {
         });
       }
     } catch (e) {
-      console.warn(
-        `Invalid rule condition for rule ID ${rule.id}:`,
-        rule.trigger_condition
-      );
+      console.warn(`Invalid rule condition for rule ID ${rule.id}:`, rule.trigger_condition);
     }
   });
 
-  // Sort by priority (lowest number = highest priority)
   return matchedRecommendations.sort((a, b) => a.priority - b.priority);
 }
 
 // Generate training program recommendations
-function generateTrainingRecommendations(athleteId, teamId) {
-  const athlete = getAthleteById(athleteId, teamId);
+async function generateTrainingRecommendations(athleteId, teamId) {
+  const athlete = await getAthleteById(athleteId, teamId);
   if (!athlete) return [];
 
-  // Get latest physical metrics
-  const latestPhysical = getLatestPhysicalAssessment(athleteId, teamId);
+  const latestPhysical = await getLatestPhysicalAssessment(athleteId, teamId);
   if (!latestPhysical) return [];
 
-  // Get criteria weights for position
-  const weights = getCriteriaWeightsByPosition(athlete.position);
+  const weights = await getCriteriaWeightsByPosition(athlete.position);
+  const exercises = await getExercises();
 
-  // Get all exercises
-  const exercises = getExercises();
-
-  // Score exercises based on focus_area match and athlete status
   const scoredExercises = exercises.map((ex) => {
     let score = 0;
-
-    // Boost score if exercise focus matches high-weight criteria
     weights.forEach((w) => {
       if (ex.focus_area.toLowerCase().includes(w.criteria_name.toLowerCase())) {
         score += w.weight * 10;
       }
     });
 
-    // Penalize if athlete is in rehabilitation
     if (athlete.status === "Rehabilitasi" && !ex.type.includes("Rehab")) {
       score -= 5;
     }
@@ -619,7 +579,6 @@ function generateTrainingRecommendations(athleteId, teamId) {
     return { ...ex, score };
   });
 
-  // Return top 5 exercises
   return scoredExercises
     .sort((a, b) => b.score - a.score)
     .slice(0, 5)
@@ -633,37 +592,26 @@ function generateTrainingRecommendations(athleteId, teamId) {
 }
 
 module.exports = {
-  // Athlete queries
   getAthleteById,
   getAthletesByTeam,
   createAthlete,
   updateAthlete,
   deleteAthlete,
-
-  // Assessment queries
   getAssessmentsByAthlete,
   getAssessmentById,
   createAssessment,
-
-  // Exercise queries
   getExercises,
   createExercise,
   getTrainingProgramsByAthlete,
   createTrainingProgram,
-
-  // Team queries
   getTeamById,
   getTeamMembers,
   getTeamAthleteCount,
-
-  // Dashboard queries
   getAthletePerformanceData,
   getLatestPhysicalAssessment,
   getLatestMentalAssessment,
   getLatestSleepAssessment,
   getTeamOverview,
-
-  // Criteria and recommendation queries
   getCriteriaWeightsByPosition,
   getAllCriteriaWeights,
   updateCriteriaWeight,
@@ -671,8 +619,6 @@ module.exports = {
   createRecommendationRule,
   updateRecommendationRule,
   deleteRecommendationRule,
-
-  // Helper functions
   calculateAthleteStatus,
   evaluateRecommendations,
   generateTrainingRecommendations,

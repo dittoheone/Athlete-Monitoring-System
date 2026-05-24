@@ -1,7 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { db } = require("../database/init");
+const { pool } = require("../database/init");
 const { JWT_SECRET } = require("../middleware/auth");
 const { validateLogin, validateRegister } = require("../middleware/validators");
 const logger = require("../utils/logger");
@@ -9,19 +9,23 @@ const logger = require("../utils/logger");
 const router = express.Router();
 
 // Login
-router.post("/login", validateLogin, (req, res) => {
+router.post("/login", validateLogin, async (req, res) => {
   try {
     const { email, password } = req.body;
 
     logger.info(`Login attempt for email: ${email}`);
 
     // Find user with team info
-    const user = db.prepare(`
+    const userResult = await pool.query(
+      `
       SELECT u.*, t.name as team_name 
       FROM users u 
       JOIN teams t ON u.team_id = t.id 
-      WHERE u.email = ?
-    `).get(email);
+      WHERE u.email = $1
+    `,
+      [email]
+    );
+    const user = userResult.rows[0];
 
     if (!user) {
       logger.warn(`Login failed - user not found: ${email}`);
@@ -71,16 +75,18 @@ router.post("/login", validateLogin, (req, res) => {
 });
 
 // Register (optional - for creating new users)
-router.post("/register", validateRegister, (req, res) => {
+router.post("/register", validateRegister, async (req, res) => {
   try {
     const { name, email, password, role, teamId } = req.body;
 
     logger.info(`Registration attempt for email: ${email}`);
 
     // Check if email already exists
-    const existingUser = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(email);
+    const existingUserResult = await pool.query(
+      "SELECT id FROM users WHERE email = $1",
+      [email]
+    );
+    const existingUser = existingUserResult.rows[0];
 
     if (existingUser) {
       logger.warn(`Registration failed - email already exists: ${email}`);
@@ -92,18 +98,20 @@ router.post("/register", validateRegister, (req, res) => {
     const hashedPassword = bcrypt.hashSync(password, bcryptRounds);
 
     // Insert user
-    const result = db
-      .prepare(
-        `INSERT INTO users (name, email, password, role, team_id) 
-         VALUES (?, ?, ?, ?, ?)`
-      )
-      .run(name, email, hashedPassword, role, teamId);
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, team_id) 
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [name, email, hashedPassword, role, teamId]
+    );
 
-    logger.info(`User registered successfully: ${email} (ID: ${result.lastInsertRowid})`);
+    const newUserId = result.rows[0].id;
+
+    logger.info(`User registered successfully: ${email} (ID: ${newUserId})`);
 
     res.status(201).json({
       message: "User registered successfully",
-      userId: result.lastInsertRowid,
+      userId: newUserId,
     });
   } catch (error) {
     logger.error('Registration error:', error);
