@@ -1,18 +1,15 @@
-// ===== exercises.js =====
 const express = require("express");
-const { db } = require("../database/init");
+const { pool } = require("../database/init");
 const { authenticateToken, authorizeRole } = require("../middleware/auth");
 
 const exerciseRouter = express.Router();
 exerciseRouter.use(authenticateToken);
 
 // Get all exercises
-exerciseRouter.get("/", (req, res) => {
+exerciseRouter.get("/", async (req, res) => {
   try {
-    const exercises = db
-      .prepare("SELECT * FROM exercise_library ORDER BY name")
-      .all();
-    res.json(exercises);
+    const result = await pool.query("SELECT * FROM exercise_library ORDER BY name");
+    res.json(result.rows);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch exercises" });
@@ -20,7 +17,7 @@ exerciseRouter.get("/", (req, res) => {
 });
 
 // Create exercise (Medical team only)
-exerciseRouter.post("/", authorizeRole("medis"), (req, res) => {
+exerciseRouter.post("/", authorizeRole("medis"), async (req, res) => {
   try {
     const { name, type, focusArea, description } = req.body;
 
@@ -30,18 +27,18 @@ exerciseRouter.post("/", authorizeRole("medis"), (req, res) => {
         .json({ error: "Name, type, and focus area required" });
     }
 
-    const result = db
-      .prepare(
-        `
+    const result = await pool.query(
+      `
       INSERT INTO exercise_library (name, type, focus_area, description)
-      VALUES (?, ?, ?, ?)
-    `
-      )
-      .run(name, type, focusArea, description || null);
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `,
+      [name, type, focusArea, description || null]
+    );
 
     res.status(201).json({
       message: "Exercise created",
-      exerciseId: result.lastInsertRowid,
+      exerciseId: result.rows[0].id,
     });
   } catch (error) {
     console.error(error);
@@ -50,11 +47,10 @@ exerciseRouter.post("/", authorizeRole("medis"), (req, res) => {
 });
 
 // Get training programs for an athlete
-exerciseRouter.get("/programs/athlete/:athleteId", (req, res) => {
+exerciseRouter.get("/programs/athlete/:athleteId", async (req, res) => {
   try {
-    const programs = db
-      .prepare(
-        `
+    const result = await pool.query(
+      `
       SELECT 
         tp.*,
         el.name as exercise_name,
@@ -63,12 +59,12 @@ exerciseRouter.get("/programs/athlete/:athleteId", (req, res) => {
       FROM training_programs tp
       JOIN exercise_library el ON tp.exercise_id = el.id
       JOIN athletes a ON tp.athlete_id = a.id
-      WHERE tp.athlete_id = ? AND a.team_id = ?
-    `
-      )
-      .all(req.params.athleteId, req.user.teamId);
+      WHERE tp.athlete_id = $1 AND a.team_id = $2
+    `,
+      [req.params.athleteId, req.user.teamId]
+    );
 
-    res.json(programs);
+    res.json(result.rows);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch training programs" });
@@ -76,7 +72,7 @@ exerciseRouter.get("/programs/athlete/:athleteId", (req, res) => {
 });
 
 // Create training program (Medical team only)
-exerciseRouter.post("/programs", authorizeRole("medis"), (req, res) => {
+exerciseRouter.post("/programs", authorizeRole("medis"), async (req, res) => {
   try {
     const {
       athleteId,
@@ -97,15 +93,14 @@ exerciseRouter.post("/programs", authorizeRole("medis"), (req, res) => {
         .json({ error: "Athlete ID and Exercise ID required" });
     }
 
-    const result = db
-      .prepare(
-        `
+    const result = await pool.query(
+      `
       INSERT INTO training_programs 
       (athlete_id, exercise_id, frequency, intensity, time, type_fitt, volume, progression, sets, reps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-      )
-      .run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id
+    `,
+      [
         athleteId,
         exerciseId,
         frequency,
@@ -116,11 +111,12 @@ exerciseRouter.post("/programs", authorizeRole("medis"), (req, res) => {
         progression,
         sets,
         reps
-      );
+      ]
+    );
 
     res.status(201).json({
       message: "Training program created",
-      programId: result.lastInsertRowid,
+      programId: result.rows[0].id,
     });
   } catch (error) {
     console.error(error);
@@ -128,64 +124,6 @@ exerciseRouter.post("/programs", authorizeRole("medis"), (req, res) => {
   }
 });
 
-// ===== teams.js =====
-const teamRouter = express.Router();
-teamRouter.use(authenticateToken);
-
-// Get all teams
-teamRouter.get("/", (req, res) => {
-  try {
-    const teams = db.prepare("SELECT * FROM teams").all();
-    res.json(teams);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch teams" });
-  }
-});
-
-// Get user's team
-teamRouter.get("/my-team", (req, res) => {
-  try {
-    const team = db
-      .prepare("SELECT * FROM teams WHERE id = ?")
-      .get(req.user.teamId);
-
-    if (!team) {
-      return res.status(404).json({ error: "Team not found" });
-    }
-
-    const members = db
-      .prepare(
-        `
-      SELECT id, name, email, role 
-      FROM users 
-      WHERE team_id = ?
-    `
-      )
-      .all(req.user.teamId);
-
-    const athleteCount = db
-      .prepare(
-        `
-      SELECT COUNT(*) as count 
-      FROM athletes 
-      WHERE team_id = ?
-    `
-      )
-      .get(req.user.teamId);
-
-    res.json({
-      ...team,
-      members,
-      athleteCount: athleteCount.count,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch team details" });
-  }
-});
-
 module.exports = {
   exerciseRouter,
-  teamRouter,
 };

@@ -1,5 +1,5 @@
 const express = require("express");
-const { db } = require("../database/init");
+const { pool } = require("../database/init");
 const { authenticateToken, authorizeRole } = require("../middleware/auth");
 
 const router = express.Router();
@@ -29,35 +29,35 @@ const METRIC_STRUCTURE = {
 };
 
 // Get all assessments for an athlete
-router.get("/athlete/:athleteId", (req, res) => {
+router.get("/athlete/:athleteId", async (req, res) => {
   try {
-    const assessments = db
-      .prepare(
-        `
+    const assessmentsResult = await pool.query(
+      `
       SELECT a.*, u.name as assessor_name
       FROM assessments a
       JOIN users u ON a.user_id = u.id
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
-    `
-      )
-      .all(req.params.athleteId, req.user.teamId);
+    `,
+      [req.params.athleteId, req.user.teamId]
+    );
+    const assessments = assessmentsResult.rows;
 
     // Get metrics for each assessment
-    const assessmentsWithMetrics = assessments.map((assessment) => {
-      const metrics = db
-        .prepare(
-          `
+    const assessmentsWithMetrics = [];
+    for (const assessment of assessments) {
+      const metricsResult = await pool.query(
+        `
         SELECT metric_category, metric_name, value
         FROM assessment_metrics
-        WHERE assessment_id = ?
-      `
-        )
-        .all(assessment.id);
+        WHERE assessment_id = $1
+      `,
+        [assessment.id]
+      );
 
-      return { ...assessment, metrics };
-    });
+      assessmentsWithMetrics.push({ ...assessment, metrics: metricsResult.rows });
+    }
 
     res.json(assessmentsWithMetrics);
   } catch (error) {
@@ -67,35 +67,35 @@ router.get("/athlete/:athleteId", (req, res) => {
 });
 
 // Get single assessment with metrics
-router.get("/:id", (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
-    const assessment = db
-      .prepare(
-        `
+    const assessmentResult = await pool.query(
+      `
       SELECT a.*, u.name as assessor_name, ath.name as athlete_name
       FROM assessments a
       JOIN users u ON a.user_id = u.id
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.id = ? AND ath.team_id = ?
-    `
-      )
-      .get(req.params.id, req.user.teamId);
+      WHERE a.id = $1 AND ath.team_id = $2
+    `,
+      [req.params.id, req.user.teamId]
+    );
+
+    const assessment = assessmentResult.rows[0];
 
     if (!assessment) {
       return res.status(404).json({ error: "Assessment not found" });
     }
 
-    const metrics = db
-      .prepare(
-        `
+    const metricsResult = await pool.query(
+      `
       SELECT metric_category, metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ?
-    `
-      )
-      .all(req.params.id);
+      WHERE assessment_id = $1
+    `,
+      [req.params.id]
+    );
 
-    res.json({ ...assessment, metrics });
+    res.json({ ...assessment, metrics: metricsResult.rows });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch assessment" });
@@ -103,7 +103,7 @@ router.get("/:id", (req, res) => {
 });
 
 // Create assessment (Medical team only)
-router.post("/", authorizeRole("medis"), (req, res) => {
+router.post("/", authorizeRole("medis"), async (req, res) => {
   try {
     const { athleteId, date, weight, notes, metrics } = req.body;
 
@@ -114,68 +114,75 @@ router.post("/", authorizeRole("medis"), (req, res) => {
     }
 
     // Verify athlete belongs to user's team
-    const athlete = db
-      .prepare("SELECT id FROM athletes WHERE id = ? AND team_id = ?")
-      .get(athleteId, req.user.teamId);
+    const athleteResult = await pool.query(
+      "SELECT id FROM athletes WHERE id = $1 AND team_id = $2",
+      [athleteId, req.user.teamId]
+    );
+    const athlete = athleteResult.rows[0];
 
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
 
     // Check if assessment already exists for this athlete on this date
-    const existingAssessment = db
-      .prepare("SELECT id FROM assessments WHERE athlete_id = ? AND date = ?")
-      .get(athleteId, date);
+    const existingAssessmentResult = await pool.query(
+      "SELECT id FROM assessments WHERE athlete_id = $1 AND date = $2",
+      [athleteId, date]
+    );
 
-    if (existingAssessment) {
+    if (existingAssessmentResult.rows[0]) {
       return res.status(400).json({
-        error:
-          "Assessment already exists for this athlete on the selected date",
+        error: "Assessment already exists for this athlete on the selected date",
       });
     }
 
-    // Begin transaction
-    const insertAssessment = db.prepare(`
-      INSERT INTO assessments (athlete_id, user_id, date, weight_kg, notes)
-      VALUES (?, ?, ?, ?, ?)
-    `);
+    const client = await pool.connect();
+    let assessmentId;
 
-    const insertMetric = db.prepare(`
-      INSERT INTO assessment_metrics (assessment_id, metric_category, metric_name, value)
-      VALUES (?, ?, ?, ?)
-    `);
+    try {
+      await client.query('BEGIN');
 
-    const updateAthlete = db.prepare(`
-      UPDATE athletes 
-      SET last_assessment_date = ?, status = ?
-      WHERE id = ?
-    `);
-
-    const transaction = db.transaction(() => {
-      const result = insertAssessment.run(
-        athleteId,
-        req.user.id,
-        date,
-        weight || null,
-        notes || null
+      const insertAssessmentResult = await client.query(
+        `
+        INSERT INTO assessments (athlete_id, user_id, date, weight_kg, notes)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+      `,
+        [athleteId, req.user.id, date, weight || null, notes || null]
       );
-      const assessmentId = result.lastInsertRowid;
+      assessmentId = insertAssessmentResult.rows[0].id;
 
       // Insert all metrics
-      Object.entries(metrics).forEach(([category, categoryMetrics]) => {
-        Object.entries(categoryMetrics).forEach(([metricName, value]) => {
-          insertMetric.run(assessmentId, category, metricName, value);
-        });
-      });
+      for (const [category, categoryMetrics] of Object.entries(metrics)) {
+        for (const [metricName, value] of Object.entries(categoryMetrics)) {
+          await client.query(
+            `
+            INSERT INTO assessment_metrics (assessment_id, metric_category, metric_name, value)
+            VALUES ($1, $2, $3, $4)
+          `,
+            [assessmentId, category, metricName, value]
+          );
+        }
+      }
 
       // Calculate overall status based on metrics
       const status = calculateAthleteStatus(metrics);
-      updateAthlete.run(date, status, athleteId);
+      await client.query(
+        `
+        UPDATE athletes 
+        SET last_assessment_date = $1, status = $2
+        WHERE id = $3
+      `,
+        [date, status, athleteId]
+      );
 
-      return assessmentId;
-    });
-
-    const assessmentId = transaction();
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
     res.status(201).json({
       message: "Assessment created successfully",

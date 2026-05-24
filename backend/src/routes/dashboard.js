@@ -1,20 +1,22 @@
 const express = require("express");
-const { db } = require("../database/init");
+const { pool } = require("../database/init");
 const { authenticateToken } = require("../middleware/auth");
 
 const router = express.Router();
 router.use(authenticateToken);
 
 // Get athlete performance tracking data
-router.get("/athlete/:athleteId/performance", (req, res) => {
+router.get("/athlete/:athleteId/performance", async (req, res) => {
   try {
     const { athleteId } = req.params;
     const { category, metric } = req.query;
 
     // Verify athlete belongs to user's team
-    const athlete = db
-      .prepare("SELECT id FROM athletes WHERE id = ? AND team_id = ?")
-      .get(athleteId, req.user.teamId);
+    const athleteResult = await pool.query(
+      "SELECT id FROM athletes WHERE id = $1 AND team_id = $2",
+      [athleteId, req.user.teamId]
+    );
+    const athlete = athleteResult.rows[0];
 
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
@@ -28,23 +30,25 @@ router.get("/athlete/:athleteId/performance", (req, res) => {
         am.value
       FROM assessments a
       JOIN assessment_metrics am ON a.id = am.assessment_id
-      WHERE a.athlete_id = ?
+      WHERE a.athlete_id = $1
     `;
     const params = [athleteId];
+    let paramCount = 2;
 
     if (category) {
-      query += " AND am.metric_category = ?";
+      query += ` AND am.metric_category = $${paramCount++}`;
       params.push(category);
     }
 
     if (metric) {
-      query += " AND am.metric_name = ?";
+      query += ` AND am.metric_name = $${paramCount++}`;
       params.push(metric);
     }
 
     query += " ORDER BY a.date ASC";
 
-    const data = db.prepare(query).all(...params);
+    const dataResult = await pool.query(query, params);
+    const data = dataResult.rows;
 
     // Calculate percentage changes
     const processedData = [];
@@ -90,36 +94,37 @@ router.get("/athlete/:athleteId/performance", (req, res) => {
 });
 
 // Get latest physical assessment for spider chart
-router.get("/athlete/:athleteId/physical", (req, res) => {
+router.get("/athlete/:athleteId/physical", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
-    const latestAssessment = db
-      .prepare(
-        `
+    const latestAssessmentResult = await pool.query(
+      `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-      )
-      .get(athleteId, req.user.teamId);
+    `,
+      [athleteId, req.user.teamId]
+    );
+
+    const latestAssessment = latestAssessmentResult.rows[0];
 
     if (!latestAssessment) {
       return res.json({ metrics: [], overallScore: 0 });
     }
 
-    const metrics = db
-      .prepare(
-        `
+    const metricsResult = await pool.query(
+      `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Pemeriksaan Fisik'
-    `
-      )
-      .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Pemeriksaan Fisik'
+    `,
+      [latestAssessment.id]
+    );
+    const metrics = metricsResult.rows;
 
     // Calculate overall fitness score (average of all physical metrics)
     const totalValue = metrics.reduce((sum, m) => sum + m.value, 0);
@@ -144,36 +149,37 @@ router.get("/athlete/:athleteId/physical", (req, res) => {
 });
 
 // Get mental health data
-router.get("/athlete/:athleteId/mental", (req, res) => {
+router.get("/athlete/:athleteId/mental", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
-    const latestAssessment = db
-      .prepare(
-        `
+    const latestAssessmentResult = await pool.query(
+      `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-      )
-      .get(athleteId, req.user.teamId);
+    `,
+      [athleteId, req.user.teamId]
+    );
+
+    const latestAssessment = latestAssessmentResult.rows[0];
 
     if (!latestAssessment) {
       return res.json({ metrics: [] });
     }
 
-    const metrics = db
-      .prepare(
-        `
+    const metricsResult = await pool.query(
+      `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Kesehatan Mental'
-    `
-      )
-      .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Kesehatan Mental'
+    `,
+      [latestAssessment.id]
+    );
+    const metrics = metricsResult.rows;
 
     res.json({
       date: latestAssessment.date,
@@ -190,36 +196,37 @@ router.get("/athlete/:athleteId/mental", (req, res) => {
 });
 
 // Get sleep quality data
-router.get("/athlete/:athleteId/sleep", (req, res) => {
+router.get("/athlete/:athleteId/sleep", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
-    const latestAssessment = db
-      .prepare(
-        `
+    const latestAssessmentResult = await pool.query(
+      `
       SELECT a.id, a.date
       FROM assessments a
       JOIN athletes ath ON a.athlete_id = ath.id
-      WHERE a.athlete_id = ? AND ath.team_id = ?
+      WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
       LIMIT 1
-    `
-      )
-      .get(athleteId, req.user.teamId);
+    `,
+      [athleteId, req.user.teamId]
+    );
+    
+    const latestAssessment = latestAssessmentResult.rows[0];
 
     if (!latestAssessment) {
       return res.json({ metrics: [], warning: null });
     }
 
-    const metrics = db
-      .prepare(
-        `
+    const metricsResult = await pool.query(
+      `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = ? AND metric_category = 'Kualitas Tidur'
-    `
-      )
-      .all(latestAssessment.id);
+      WHERE assessment_id = $1 AND metric_category = 'Kualitas Tidur'
+    `,
+      [latestAssessment.id]
+    );
+    const metrics = metricsResult.rows;
 
     // Check for sleep warning
     const avgSleep = metrics.find(
@@ -246,19 +253,19 @@ router.get("/athlete/:athleteId/sleep", (req, res) => {
 });
 
 // Get team overview
-router.get("/team/overview", (req, res) => {
+router.get("/team/overview", async (req, res) => {
   try {
-    const athletes = db
-      .prepare(
-        `
+    const athletesResult = await pool.query(
+      `
       SELECT 
         id, name, position, status, last_assessment_date
       FROM athletes
-      WHERE team_id = ?
+      WHERE team_id = $1
       ORDER BY name
-    `
-      )
-      .all(req.user.teamId);
+    `,
+      [req.user.teamId]
+    );
+    const athletes = athletesResult.rows;
 
     // Get status distribution
     const statusCounts = {
@@ -285,23 +292,20 @@ router.get("/team/overview", (req, res) => {
     });
 
     // Calculate team average physical score
-    const recentAssessments = db
-      .prepare(
-        `
-    SELECT am.value
-    FROM assessments a1
-    JOIN assessment_metrics am ON a1.id = am.assessment_id
-    JOIN athletes ath ON a1.athlete_id = ath.id
-    WHERE ath.team_id = ?
-      AND am.metric_category = 'Pemeriksaan Fisik'
-      AND a1.date = (
-        SELECT MAX(a2.date)
-        FROM assessments a2
-        WHERE a2.athlete_id = a1.athlete_id
-      )
-  `
-      )
-      .all(req.user.teamId);
+    const recentAssessmentsResult = await pool.query(
+      `
+      SELECT DISTINCT ON (a.athlete_id) 
+        am.value
+      FROM assessments a
+      JOIN assessment_metrics am ON a.id = am.assessment_id
+      JOIN athletes ath ON a.athlete_id = ath.id
+      WHERE ath.team_id = $1 
+        AND am.metric_category = 'Pemeriksaan Fisik'
+      ORDER BY a.athlete_id, a.date DESC
+    `,
+      [req.user.teamId]
+    );
+    const recentAssessments = recentAssessmentsResult.rows;
 
     const avgTeamFitness =
       recentAssessments.length > 0
