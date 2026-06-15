@@ -1,31 +1,37 @@
 const express = require("express");
 const { pool } = require("../database/init");
 const { authenticateToken, authorizeRole } = require("../middleware/auth");
+const { createAssessment } = require("../database/queries");
 
 const router = express.Router();
 router.use(authenticateToken);
 
+const getTeamId = (req) => req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null);
+
+
 // Predefined metric structure
 const METRIC_STRUCTURE = {
-  Rehabilitasi: ["Cedera", "Pemulihan"],
-  "Pemeriksaan Fisik": [
-    "Fleksibilitas",
-    "Kekuatan",
-    "Daya Tahan",
-    "Kecepatan",
-    "Keseimbangan",
-    "Kelincahan",
+  "Fisik & BIA": [
+    "Kecepatan (Sprint 30m) (Detik)",
+    "Kekuatan (1RM Squat) (Kg)",
+    "Daya Tahan (VO2 Max) (mL/kg/min)",
+    "Kelincahan (Illinois) (Detik)",
+    "Keseimbangan (Y-Balance) (Cm)",
+    "InBody Score (0-100)",
+    "Body Fat % (Opsional)"
   ],
-  "Kesehatan Mental": [
-    "Stress",
-    "Motivasi",
-    "Percaya Diri",
-    "Kohesi Tim",
-    "Fokus",
+  "Mental & Tidur": [
+    "Durasi Tidur (Jam)",
+    "Kualitas Tidur (1-10)",
+    "Motivasi (1-10)",
+    "Fokus (1-10)",
+    "Kepercayaan Diri (1-10)",
+    "Tingkat Stres (1-10)"
   ],
-  "Kualitas Tidur": ["Rata-rata Jam Tidur", "Kualitas", "Konsistensi"],
-  Recovery: ["Tingkat Recovery"],
-  "Tingkat Aktivitas": ["Harian", "Latihan", "Pertandingan", "Recovery"],
+  "ERP": [
+    "RPE (Intensitas Latihan) (1-10)",
+    "Nyeri Otot (Soreness) (1-10)"
+  ]
 };
 
 // Get all assessments for an athlete
@@ -40,7 +46,7 @@ router.get("/athlete/:athleteId", async (req, res) => {
       WHERE a.athlete_id = $1 AND ath.team_id = $2
       ORDER BY a.date DESC
     `,
-      [req.params.athleteId, req.user.teamId]
+      [req.params.athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
     const assessments = assessmentsResult.rows;
 
@@ -77,7 +83,7 @@ router.get("/:id", async (req, res) => {
       JOIN athletes ath ON a.athlete_id = ath.id
       WHERE a.id = $1 AND ath.team_id = $2
     `,
-      [req.params.id, req.user.teamId]
+      [req.params.id, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
 
     const assessment = assessmentResult.rows[0];
@@ -116,7 +122,7 @@ router.post("/", authorizeRole("medis"), async (req, res) => {
     // Verify athlete belongs to user's team
     const athleteResult = await pool.query(
       "SELECT id FROM athletes WHERE id = $1 AND team_id = $2",
-      [athleteId, req.user.teamId]
+      [athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
     const athlete = athleteResult.rows[0];
 
@@ -130,59 +136,51 @@ router.post("/", authorizeRole("medis"), async (req, res) => {
       [athleteId, date]
     );
 
-    if (existingAssessmentResult.rows[0]) {
-      return res.status(400).json({
-        error: "Assessment already exists for this athlete on the selected date",
-      });
-    }
+    const existingId = existingAssessmentResult.rows[0]?.id;
 
-    const client = await pool.connect();
-    let assessmentId;
-
-    try {
-      await client.query('BEGIN');
-
-      const insertAssessmentResult = await client.query(
-        `
-        INSERT INTO assessments (athlete_id, user_id, date, weight_kg, notes)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id
-      `,
-        [athleteId, req.user.id, date, weight || null, notes || null]
-      );
-      assessmentId = insertAssessmentResult.rows[0].id;
-
-      // Insert all metrics
+    if (existingId) {
+      // Append metrics to existing assessment
       for (const [category, categoryMetrics] of Object.entries(metrics)) {
         for (const [metricName, value] of Object.entries(categoryMetrics)) {
-          await client.query(
+          // Upsert metric manually
+          await pool.query(
+            "DELETE FROM assessment_metrics WHERE assessment_id = $1 AND metric_category = $2 AND metric_name = $3",
+            [existingId, category, metricName]
+          );
+          await pool.query(
             `
             INSERT INTO assessment_metrics (assessment_id, metric_category, metric_name, value)
             VALUES ($1, $2, $3, $4)
-          `,
-            [assessmentId, category, metricName, value]
+            `,
+            [existingId, category, metricName, value]
           );
         }
       }
+      
+      // Trigger recalculation of status
+      const { calculateAthleteStatus } = require("../database/queries");
+      const client = await pool.connect();
+      try {
+        const status = await calculateAthleteStatus(athleteId, client);
+        await client.query("UPDATE athletes SET status = $1 WHERE id = $2", [status, athleteId]);
+      } finally {
+        client.release();
+      }
 
-      // Calculate overall status based on metrics
-      const status = calculateAthleteStatus(metrics);
-      await client.query(
-        `
-        UPDATE athletes 
-        SET last_assessment_date = $1, status = $2
-        WHERE id = $3
-      `,
-        [date, status, athleteId]
-      );
-
-      await client.query('COMMIT');
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
+      return res.status(200).json({
+        message: "Assessment updated successfully",
+        assessmentId: existingId,
+      });
     }
+
+    const assessmentId = await createAssessment(
+      athleteId,
+      req.user.id,
+      date,
+      weight,
+      notes,
+      metrics
+    );
 
     res.status(201).json({
       message: "Assessment created successfully",
@@ -194,38 +192,6 @@ router.post("/", authorizeRole("medis"), async (req, res) => {
   }
 });
 
-// Helper function to calculate athlete status
-function calculateAthleteStatus(metrics) {
-  const physical = metrics["Pemeriksaan Fisik"] || {};
-  const mental = metrics["Kesehatan Mental"] || {};
-  const rehab = metrics["Rehabilitasi"] || {};
-
-  // Check if in rehabilitation
-  if (rehab.Cedera && rehab.Cedera >= 7) {
-    return "Rehabilitasi";
-  }
-  if (rehab.Pemulihan && rehab.Pemulihan < 5) {
-    return "Pemulihan";
-  }
-
-  // Calculate average physical score
-  const physicalValues = Object.values(physical);
-  const mentalValues = Object.values(mental);
-
-  const avgPhysical =
-    physicalValues.length > 0
-      ? physicalValues.reduce((a, b) => a + b, 0) / physicalValues.length
-      : 5;
-  const avgMental =
-    mentalValues.length > 0
-      ? mentalValues.reduce((a, b) => a + b, 0) / mentalValues.length
-      : 5;
-
-  // Determine status
-  if (avgPhysical >= 8 && avgMental >= 8) return "Prima";
-  if (avgPhysical >= 6 && avgMental >= 6) return "Fit";
-  return "Pemulihan";
-}
 
 // Get metric structure
 router.get("/metrics/structure", (req, res) => {

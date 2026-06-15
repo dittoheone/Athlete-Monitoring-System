@@ -5,13 +5,16 @@ const queries = require("../database/queries");
 const router = express.Router();
 router.use(authenticateToken);
 
+const getTeamId = (req) => req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null);
+
+
 // Get holistic recommendations for an athlete
 router.get("/athlete/:athleteId", async (req, res) => {
   try {
     const { athleteId } = req.params;
 
     // Verify athlete belongs to user's team
-    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
@@ -19,13 +22,13 @@ router.get("/athlete/:athleteId", async (req, res) => {
     // Get rule-based recommendations
     const ruleRecommendations = await queries.evaluateRecommendations(
       athleteId,
-      req.user.teamId
+      (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))
     );
 
     // Get training recommendations
     const trainingRecommendations = await queries.generateTrainingRecommendations(
       athleteId,
-      req.user.teamId
+      (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))
     );
 
     res.json({
@@ -49,7 +52,7 @@ router.post("/training-program", async (req, res) => {
   try {
     const { athleteId, exerciseId, ...programData } = req.body;
 
-    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
@@ -76,7 +79,7 @@ router.get("/training/:athleteId", async (req, res) => {
     const { athleteId } = req.params;
 
     // Verify athlete belongs to user's team
-    const athlete = await queries.getAthleteById(athleteId, req.user.teamId);
+    const athlete = await queries.getAthleteById(athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
     if (!athlete) {
       return res.status(404).json({ error: "Athlete not found" });
     }
@@ -96,10 +99,11 @@ router.get("/training/:athleteId", async (req, res) => {
     const scoredExercises = exercises.map((ex) => {
       let score = 0;
       weights.forEach((w) => {
-        // Match focus_area (case-insensitive partial match)
-        if (
-          ex.focus_area.toLowerCase().includes(w.criteria_name.toLowerCase())
-        ) {
+        // Match mapped_metric or focus_area (case-insensitive partial match)
+        const metricMatch = ex.mapped_metric && ex.mapped_metric.toLowerCase().includes(w.criteria_name.toLowerCase());
+        const focusMatch = ex.focus_area && ex.focus_area.toLowerCase().includes(w.criteria_name.toLowerCase());
+        
+        if (metricMatch || focusMatch) {
           score += w.weight * 100; // Convert weight (0.25) → 25 points
         }
       });
@@ -119,12 +123,19 @@ router.get("/training/:athleteId", async (req, res) => {
     const topExercises = scoredExercises
       .sort((a, b) => b.score - a.score)
       .slice(0, 5)
-      .map(({ id, name, type, focus_area, description, score }) => ({
+      .map(({ id, name, type, focus_area, description, mapped_metric, frequency, intensity, time_duration, type_fitt, sets, reps, score }) => ({
         exercise_id: id,
         name,
         type,
         focus_area,
         description,
+        mapped_metric,
+        frequency,
+        intensity,
+        time_duration,
+        type_fitt,
+        sets,
+        reps,
         score: Math.round(score),
       }));
 

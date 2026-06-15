@@ -4,15 +4,24 @@ const config = require('../utils/config');
 const logger = require('../utils/logger');
 
 // Create connection pool
+const poolConfig = config.DATABASE_URL
+  ? { 
+      connectionString: config.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    }
+  : {
+      host: config.DB_HOST,
+      port: config.DB_PORT,
+      database: config.DB_NAME,
+      user: config.DB_USER,
+      password: config.DB_PASSWORD,
+    };
+
 const pool = new Pool({
-  host: config.DB_HOST,
-  port: config.DB_PORT,
-  database: config.DB_NAME,
-  user: config.DB_USER,
-  password: config.DB_PASSWORD,
+  ...poolConfig,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 15000,
 });
 
 // Test connection
@@ -37,7 +46,9 @@ async function initializeDatabase() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS teams (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
+        name TEXT NOT NULL UNIQUE,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
       );
     `);
     
@@ -47,8 +58,18 @@ async function initializeDatabase() {
         name TEXT NOT NULL,
         email TEXT NOT NULL UNIQUE,
         password TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('medis', 'pelatih')),
-        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE
+        role TEXT NOT NULL CHECK(role IN ('medis', 'pelatih', 'admin')),
+        requires_password_change BOOLEAN DEFAULT FALSE,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
+      );
+    `);
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_teams (
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+        PRIMARY KEY (user_id, team_id)
       );
     `);
     
@@ -58,8 +79,12 @@ async function initializeDatabase() {
         team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
         position TEXT NOT NULL CHECK(position IN ('Striker', 'Midfielder', 'Defender', 'Goalkeeper')),
-        status TEXT NOT NULL DEFAULT 'Fit' CHECK(status IN ('Prima', 'Fit', 'Pemulihan', 'Rehabilitasi')),
-        last_assessment_date DATE
+        status TEXT NOT NULL DEFAULT 'Fit' CHECK(status IN ('Prima', 'Fit', 'Underperform', 'Cedera', 'Rehabilitasi')),
+        last_assessment_date DATE,
+        date_of_birth DATE,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL,
+        UNIQUE (name, team_id)
       );
     `);
     
@@ -90,7 +115,16 @@ async function initializeDatabase() {
         name TEXT NOT NULL,
         type TEXT NOT NULL,
         focus_area TEXT NOT NULL,
-        description TEXT
+        description TEXT,
+        mapped_metric TEXT,
+        frequency TEXT,
+        intensity TEXT,
+        time_duration TEXT,
+        type_fitt TEXT,
+        sets INTEGER,
+        reps INTEGER,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
       );
     `);
     
@@ -106,7 +140,9 @@ async function initializeDatabase() {
         volume TEXT,
         progression TEXT,
         sets INTEGER,
-        reps INTEGER
+        reps INTEGER,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
       );
     `);
     
@@ -126,6 +162,112 @@ async function initializeDatabase() {
         trigger_condition TEXT NOT NULL,
         recommendation_text TEXT NOT NULL,
         UNIQUE(trigger_condition, recommendation_text)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS injury_records (
+        id SERIAL PRIMARY KEY,
+        athlete_id INTEGER NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+        injury_type TEXT NOT NULL,
+        severity_level TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Aktif',
+        estimated_recovery TEXT,
+        notes TEXT,
+        date DATE NOT NULL DEFAULT CURRENT_DATE,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS matches (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        opponent_name TEXT NOT NULL,
+        match_date DATE NOT NULL,
+        venue TEXT,
+        competition TEXT,
+        result_status TEXT,
+        score TEXT
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS match_statistics (
+        id SERIAL PRIMARY KEY,
+        match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+        athlete_id INTEGER NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+        minutes_played INTEGER DEFAULT 0,
+        goals INTEGER DEFAULT 0,
+        assists INTEGER DEFAULT 0,
+        yellow_cards INTEGER DEFAULT 0,
+        red_cards INTEGER DEFAULT 0,
+        rating REAL,
+        UNIQUE(match_id, athlete_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS team_standards (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        position TEXT NOT NULL,
+        metric_name TEXT NOT NULL,
+        standard_value REAL NOT NULL,
+        UNIQUE(team_id, position, metric_name)
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS team_settings (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE UNIQUE,
+        threshold_prima REAL NOT NULL DEFAULT 85,
+        threshold_underperform REAL NOT NULL DEFAULT 70,
+        weight_fisik REAL NOT NULL DEFAULT 0.40,
+        weight_bia REAL NOT NULL DEFAULT 0.25,
+        weight_mental REAL NOT NULL DEFAULT 0.20,
+        weight_tidur REAL NOT NULL DEFAULT 0.15,
+        deleted_at TIMESTAMP DEFAULT NULL,
+        deleted_by INTEGER DEFAULT NULL
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS team_schedules (
+        id SERIAL PRIMARY KEY,
+        team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+        date TIMESTAMP NOT NULL,
+        title TEXT NOT NULL,
+        target TEXT NOT NULL,
+        session_type TEXT NOT NULL,
+        time_range TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id SERIAL PRIMARY KEY,
+        ticket_type TEXT NOT NULL CHECK(ticket_type IN ('password_reset', 'account_creation')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'resolved')),
+        email TEXT NOT NULL,
+        name TEXT NOT NULL,
+        details JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP DEFAULT NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS activity_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        action TEXT NOT NULL,
+        category TEXT NOT NULL,
+        status TEXT NOT NULL,
+        ip_address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
     
@@ -172,18 +314,24 @@ async function insertSampleData(client) {
     ['Coach Andi', 'pelatih@test.com', hashedPassword, 'pelatih', teamId]
   );
   
+  await client.query(
+    `INSERT INTO users (name, email, password, role, team_id) 
+     VALUES ($1, $2, $3, $4, $5)`,
+    ['Admin Super', 'admin@test.com', hashedPassword, 'admin', null]
+  );
+  
   // Insert sample athletes
   const athletes = [
-    ['Rafi Ahmad', 'Striker', 'Prima', '2025-10-10'],
-    ['Dimas Setiawan', 'Midfielder', 'Fit', '2025-10-09'],
-    ['Yoga Pratama', 'Defender', 'Pemulihan', '2025-10-08'],
-    ['Eko Saputra', 'Goalkeeper', 'Fit', '2025-10-10'],
+    ['Rafi Ahmad', 'Striker', 'Prima', '2025-10-10', '2000-01-01'],
+    ['Dimas Setiawan', 'Midfielder', 'Fit', '2025-10-09', '2001-02-02'],
+    ['Yoga Pratama', 'Defender', 'Fit', '2025-10-08', '2000-05-05'],
+    ['Eko Saputra', 'Goalkeeper', 'Fit', '2025-10-10', '1999-12-12'],
   ];
   
   for (const athlete of athletes) {
     await client.query(
-      `INSERT INTO athletes (team_id, name, position, status, last_assessment_date) 
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO athletes (team_id, name, position, status, last_assessment_date, date_of_birth) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [teamId, ...athlete]
     );
   }
@@ -224,9 +372,32 @@ async function insertSampleData(client) {
       );
     }
   }
+
+  // Insert default team settings
+  await client.query(`
+    INSERT INTO team_settings (team_id, threshold_prima, threshold_underperform)
+    VALUES ($1, 85, 70)
+  `, [teamId]);
+
+  // Insert default team standards (example)
+  const defaultStandards = [
+    ['Striker', 'Kecepatan (Sprint 30m) (detik)', 4.0],
+    ['Striker', 'Kekuatan (1RM Squat) (kg)', 120],
+    ['Striker', 'Daya Tahan (VO2 Max) (mL/kg/min)', 55],
+    ['Striker', 'Kelincahan (Illinois) (detik)', 16.5],
+    ['Striker', 'Keseimbangan (Y-Balance) (cm)', 90],
+  ];
+
+  for (const std of defaultStandards) {
+    await client.query(`
+      INSERT INTO team_standards (team_id, position, metric_name, standard_value)
+      VALUES ($1, $2, $3, $4)
+    `, [teamId, ...std]);
+  }
   
   logger.info('✓ Sample data inserted');
   logger.info('\nDefault credentials:');
+  logger.info('Admin - Email: admin@test.com, Password: password123');
   logger.info('Medis - Email: medis@test.com, Password: password123');
   logger.info('Pelatih - Email: pelatih@test.com, Password: password123');
 }

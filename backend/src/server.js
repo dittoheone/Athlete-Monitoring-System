@@ -80,6 +80,13 @@ const teamRouter = require("./routes/teams");
 const exerciseRouter = require("./routes/exercises").exerciseRouter;
 const dashboardRoutes = require("./routes/dashboard");
 const recommendationRoutes = require("./routes/recommendations");
+const adminRoutes = require("./routes/admin");
+const injuriesRoutes = require("./routes/injuries");
+const matchesRoutes = require("./routes/matches");
+const settingsRoutes = require("./routes/settings");
+const schedulesRoutes = require("./routes/schedules");
+const recycleBinRoutes = require("./routes/recycle-bin");
+const supportRoutes = require("./routes/support");
 
 // Use routes with auth limiter for login/register
 app.use("/api/auth", authLimiter, authRoutes);
@@ -89,6 +96,13 @@ app.use("/api/teams", teamRouter);
 app.use("/api/exercises", exerciseRouter);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/recommendations", recommendationRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/injuries", injuriesRoutes);
+app.use("/api/matches", matchesRoutes);
+app.use("/api/settings", settingsRoutes);
+app.use("/api/schedules", schedulesRoutes);
+app.use("/api/recycle-bin", recycleBinRoutes);
+app.use("/api/support", supportRoutes);
 
 // Health check (no auth required)
 app.get("/api/health", async (req, res) => {

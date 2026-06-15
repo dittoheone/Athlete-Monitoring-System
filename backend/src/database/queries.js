@@ -7,7 +7,7 @@ const getAthleteById = async (athleteId, teamId) => {
       SELECT a.*, t.name as team_name
       FROM athletes a
       JOIN teams t ON a.team_id = t.id
-      WHERE a.id = $1 AND a.team_id = $2
+      WHERE a.id = $1 AND a.team_id = $2 AND a.deleted_at IS NULL
     `,
     [athleteId, teamId]
   );
@@ -18,7 +18,7 @@ const getAthletesByTeam = async (teamId) => {
   const result = await pool.query(
     `
       SELECT * FROM athletes 
-      WHERE team_id = $1 
+      WHERE team_id = $1 AND deleted_at IS NULL
       ORDER BY name
     `,
     [teamId]
@@ -49,8 +49,8 @@ const updateAthlete = async (athleteId, updates) => {
   return result;
 };
 
-const deleteAthlete = async (athleteId, teamId) => {
-  const result = await pool.query("DELETE FROM athletes WHERE id = $1 AND team_id = $2", [athleteId, teamId]);
+const deleteAthlete = async (athleteId, teamId, userId) => {
+  const result = await pool.query("UPDATE athletes SET deleted_at = NOW(), deleted_by = $1 WHERE id = $2 AND team_id = $3", [userId, athleteId, teamId]);
   return result;
 };
 
@@ -135,7 +135,7 @@ const createAssessment = async (athleteId, userId, date, weight, notes, metrics)
       }
     }
 
-    const status = calculateAthleteStatus(metrics);
+    const { status } = await calculateAthleteStatus(athleteId, client);
     await client.query(`
       UPDATE athletes 
       SET last_assessment_date = $1, status = $2
@@ -306,7 +306,7 @@ const getLatestPhysicalAssessment = async (athleteId, teamId) => {
     `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = $1 AND metric_category = 'Pemeriksaan Fisik'
+      WHERE assessment_id = $1 AND metric_category = 'Fisik & BIA'
     `,
     [latestAssessment.id]
   );
@@ -334,12 +334,18 @@ const getLatestMentalAssessment = async (athleteId, teamId) => {
     `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = $1 AND metric_category = 'Kesehatan Mental'
+      WHERE assessment_id = $1 AND metric_category = 'Mental & Tidur'
     `,
     [latestAssessment.id]
   );
+  
+  // Filter out sleep metrics
+  const metrics = metricsResult.rows.filter(m => 
+    !m.metric_name.toLowerCase().includes('tidur') && 
+    !m.metric_name.toLowerCase().includes('sleep')
+  );
 
-  return { latestAssessment, metrics: metricsResult.rows };
+  return { latestAssessment, metrics };
 };
 
 const getLatestSleepAssessment = async (athleteId, teamId) => {
@@ -362,12 +368,18 @@ const getLatestSleepAssessment = async (athleteId, teamId) => {
     `
       SELECT metric_name, value
       FROM assessment_metrics
-      WHERE assessment_id = $1 AND metric_category = 'Kualitas Tidur'
+      WHERE assessment_id = $1 AND metric_category = 'Mental & Tidur'
     `,
     [latestAssessment.id]
   );
+  
+  // Filter only sleep metrics
+  const metrics = metricsResult.rows.filter(m => 
+    m.metric_name.toLowerCase().includes('tidur') || 
+    m.metric_name.toLowerCase().includes('sleep')
+  );
 
-  return { latestAssessment, metrics: metricsResult.rows };
+  return { latestAssessment, metrics };
 };
 
 const getTeamOverview = async (teamId) => {
@@ -381,36 +393,158 @@ const getTeamOverview = async (teamId) => {
     `,
     [teamId]
   );
-  return result.rows;
+  
+  const athletes = result.rows;
+  for (let i = 0; i < athletes.length; i++) {
+    const { spkScore, fisikScore, mentalScore, tidurDurasi } = await calculateAthleteStatus(athletes[i].id, pool);
+    athletes[i].spkScore = parseFloat((spkScore || 0).toFixed(1));
+    athletes[i].fisikScore = parseFloat((fisikScore || 0).toFixed(1));
+    athletes[i].mentalScore = parseFloat((mentalScore || 0).toFixed(1));
+    athletes[i].tidurDurasi = parseFloat((tidurDurasi || 0).toFixed(1));
+  }
+  
+  return athletes;
 };
 
 // Helper functions
-function calculateAthleteStatus(metrics) {
-  const physical = metrics["Pemeriksaan Fisik"] || {};
-  const mental = metrics["Kesehatan Mental"] || {};
-  const rehab = metrics["Rehabilitasi"] || {};
+async function calculateAthleteStatus(athleteId, client) {
+  // 1. Logika Cedera Override
+  const injuryRes = await client.query(
+    "SELECT id FROM injury_records WHERE athlete_id = $1 AND status = 'Aktif' LIMIT 1", 
+    [athleteId]
+  );
+  if (injuryRes.rows.length > 0) return { status: 'Cedera', spkScore: 0 };
 
-  if (rehab.Cedera && rehab.Cedera >= 7) {
-    return "Rehabilitasi";
+  // 2. Fetch Athlete Data, Team Settings, and Standards
+  const athRes = await client.query("SELECT team_id, position FROM athletes WHERE id = $1", [athleteId]);
+  if (athRes.rows.length === 0) return { status: 'Fit', spkScore: 0 };
+  const { team_id: teamId, position } = athRes.rows[0];
+
+  const settingsRes = await client.query("SELECT * FROM team_settings WHERE team_id = $1", [teamId]);
+  const settings = settingsRes.rows[0] || {
+    threshold_prima: 85, threshold_underperform: 70,
+    weight_fisik: 0.40, weight_bia: 0.25, weight_mental: 0.20, weight_tidur: 0.15
+  };
+
+  const stdRes = await client.query("SELECT metric_name, standard_value FROM team_standards WHERE team_id = $1 AND position = $2", [teamId, position]);
+  const standards = {};
+  stdRes.rows.forEach(r => standards[r.metric_name] = r.standard_value);
+
+  // 3. Fetch latest metrics for this athlete
+  const latestAssRes = await client.query(
+    "SELECT id FROM assessments WHERE athlete_id = $1 ORDER BY date DESC LIMIT 1", 
+    [athleteId]
+  );
+  if (latestAssRes.rows.length === 0) return { status: 'Fit', spkScore: 0 };
+  const assessmentId = latestAssRes.rows[0].id;
+
+  const metricsRes = await client.query(
+    "SELECT metric_category, metric_name, value FROM assessment_metrics WHERE assessment_id = $1", 
+    [assessmentId]
+  );
+  
+  const physical = {};
+  const mental = {};
+  const tidur = {};
+  let inbodyScore = 0;
+  
+  metricsRes.rows.forEach(m => {
+    const val = parseFloat(m.value) || 0;
+    const cat = m.metric_category.toLowerCase();
+    const name = m.metric_name.toLowerCase();
+    
+    if (cat.includes('fisik') || cat.includes('physical')) {
+      physical[m.metric_name] = val;
+    } else if (cat.includes('mental') || cat.includes('tidur') || cat.includes('sleep')) {
+      if (name.includes('tidur') || name.includes('sleep')) {
+        tidur[name] = val;
+      } else {
+        mental[name] = val;
+      }
+    }
+    
+    if (cat.includes('bia') || name.includes('inbody') || name.includes('body fat')) {
+      if (name.includes('inbody')) inbodyScore = val;
+    }
+  });
+
+  // Fisik (SAW)
+  let s_fisik_total = 0;
+  let fisik_count = 0;
+  for (const [metric, val] of Object.entries(physical)) {
+    const ideal = parseFloat(standards[metric]) || val || 1; // fallback to 1 to avoid DivisionByZero
+    if (metric.toLowerCase().includes('sprint') || metric.toLowerCase().includes('illinois')) {
+      s_fisik_total += Math.min(100, (ideal / (val || 1)) * 100);
+    } else {
+      s_fisik_total += Math.min(100, (val / ideal) * 100);
+    }
+    fisik_count++;
   }
-  if (rehab.Pemulihan && rehab.Pemulihan < 5) {
-    return "Pemulihan";
+  const s_fisik = fisik_count > 0 ? s_fisik_total / fisik_count : 0;
+
+  // BIA
+  const s_bia = inbodyScore;
+
+  // Tidur
+  const durasiKey = Object.keys(tidur).find(k => k.includes('durasi')) || "durasi tidur";
+  const kualitasKey = Object.keys(tidur).find(k => k.includes('kualitas')) || "kualitas tidur";
+  const durasi = tidur[durasiKey] || 0;
+  const kualitas = tidur[kualitasKey] || 0;
+  const s_durasi = Math.min(100, (durasi / 8) * 100);
+  const s_kualitas = kualitas * 10;
+  const s_tidur = ((s_durasi + s_kualitas) / 2) || 0;
+
+  // Mental
+  const motivasiKey = Object.keys(mental).find(k => k.includes('motivasi')) || "motivasi";
+  const fokusKey = Object.keys(mental).find(k => k.includes('fokus')) || "fokus";
+  const pdKey = Object.keys(mental).find(k => k.includes('percaya') || k.includes('pd')) || "kepercayaan diri";
+  const stresKey = Object.keys(mental).find(k => k.includes('stres') || k.includes('stress')) || "stres";
+  
+  const motivasi = mental[motivasiKey] || 0;
+  const fokus = mental[fokusKey] || 0;
+  const percayadiri = mental[pdKey] || 0;
+  const stres = mental[stresKey] || 0;
+  
+  // Hitung rata-rata komponen mental (ubah stres negatif jadi positif 11 - x)
+  const mental_components = [];
+  if (mental[motivasiKey]) mental_components.push(motivasi * 10);
+  if (mental[fokusKey]) mental_components.push(fokus * 10);
+  if (mental[pdKey]) mental_components.push(percayadiri * 10);
+  if (mental[stresKey]) mental_components.push((11 - stres) * 10);
+
+  const s_mental = mental_components.length > 0 
+    ? mental_components.reduce((a, b) => a + b, 0) / mental_components.length 
+    : 0;
+
+  // Holistic Score with Dynamic Weight Normalization
+  let w_fisik = s_fisik > 0 ? settings.weight_fisik : 0;
+  let w_bia = s_bia > 0 ? settings.weight_bia : 0;
+  let w_mental = s_mental > 0 ? settings.weight_mental : 0;
+  let w_tidur = s_tidur > 0 ? settings.weight_tidur : 0;
+  
+  const totalWeight = w_fisik + w_bia + w_mental + w_tidur;
+  let skorHolistik = 0;
+  
+  if (totalWeight > 0) {
+    skorHolistik = parseFloat(((
+      (w_fisik * s_fisik) + 
+      (w_bia * s_bia) + 
+      (w_mental * s_mental) + 
+      (w_tidur * s_tidur)
+    ) / totalWeight).toFixed(1));
   }
 
-  const physicalValues = Object.values(physical);
-  const mentalValues = Object.values(mental);
-  const avgPhysical =
-    physicalValues.length > 0
-      ? physicalValues.reduce((a, b) => a + b, 0) / physicalValues.length
-      : 5;
-  const avgMental =
-    mentalValues.length > 0
-      ? mentalValues.reduce((a, b) => a + b, 0) / mentalValues.length
-      : 5;
-
-  if (avgPhysical >= 8 && avgMental >= 8) return "Prima";
-  if (avgPhysical >= 6 && avgMental >= 6) return "Fit";
-  return "Pemulihan";
+  let status = 'Underperform';
+  if (skorHolistik >= settings.threshold_prima) status = 'Prima';
+  else if (skorHolistik >= settings.threshold_underperform) status = 'Fit';
+  
+  return { 
+    status, 
+    spkScore: skorHolistik,
+    fisikScore: s_fisik,
+    mentalScore: s_mental,
+    tidurDurasi: durasi
+  };
 }
 
 // Criteria and recommendation queries
@@ -518,26 +652,48 @@ async function evaluateRecommendations(athleteId, teamId) {
       const condition = JSON.parse(rule.trigger_condition);
       let matches = true;
 
-      Object.entries(condition).forEach(([metricName, expression]) => {
-        const actualValue = metricMap[metricName];
+      // Handle structured JSON format
+      if (condition.metricName) {
+        const actualValue = metricMap[condition.metricName];
         if (actualValue === undefined) {
           matches = false;
-          return;
-        }
+        } else {
+          const operator = condition.operator;
+          const threshold = parseFloat(condition.value);
 
-        const operator = expression.match(/^[<>=!]+/)?.[0] || "==";
-        const threshold = parseFloat(expression.replace(/^[<>=!]+/, ""));
-
-        switch (operator) {
-          case ">=": if (!(actualValue >= threshold)) matches = false; break;
-          case ">": if (!(actualValue > threshold)) matches = false; break;
-          case "<=": if (!(actualValue <= threshold)) matches = false; break;
-          case "<": if (!(actualValue < threshold)) matches = false; break;
-          case "==": case "=": if (!(actualValue === threshold)) matches = false; break;
-          case "!=": if (!(actualValue !== threshold)) matches = false; break;
-          default: matches = false;
+          switch (operator) {
+            case ">=": if (!(actualValue >= threshold)) matches = false; break;
+            case ">": if (!(actualValue > threshold)) matches = false; break;
+            case "<=": if (!(actualValue <= threshold)) matches = false; break;
+            case "<": if (!(actualValue < threshold)) matches = false; break;
+            case "==": case "=": if (!(actualValue === threshold)) matches = false; break;
+            case "!=": if (!(actualValue !== threshold)) matches = false; break;
+            default: matches = false;
+          }
         }
-      });
+      } else {
+        // Fallback for old legacy format
+        Object.entries(condition).forEach(([metricName, expression]) => {
+          const actualValue = metricMap[metricName];
+          if (actualValue === undefined) {
+            matches = false;
+            return;
+          }
+
+          const operator = expression.match(/^[<>=!]+/)?.[0] || "==";
+          const threshold = parseFloat(expression.replace(/^[<>=!]+/, ""));
+
+          switch (operator) {
+            case ">=": if (!(actualValue >= threshold)) matches = false; break;
+            case ">": if (!(actualValue > threshold)) matches = false; break;
+            case "<=": if (!(actualValue <= threshold)) matches = false; break;
+            case "<": if (!(actualValue < threshold)) matches = false; break;
+            case "==": case "=": if (!(actualValue === threshold)) matches = false; break;
+            case "!=": if (!(actualValue !== threshold)) matches = false; break;
+            default: matches = false;
+          }
+        });
+      }
 
       if (matches) {
         matchedRecommendations.push({

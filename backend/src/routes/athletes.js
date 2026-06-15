@@ -1,25 +1,48 @@
 const express = require("express");
 const { pool } = require("../database/init");
 const { authenticateToken } = require("../middleware/auth");
+const { logActivity } = require("../utils/activityLogger");
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(authenticateToken);
 
+const getTeamId = (req) => req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null);
+
+
 // Get all athletes for user's team
 router.get("/", async (req, res) => {
   try {
-    const result = await pool.query(
-      `
+    const page = parseInt(req.query.page);
+    const limit = parseInt(req.query.limit);
+    const teamId = req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null);
+    
+    let query = `
       SELECT * FROM athletes 
-      WHERE team_id = $1 
+      WHERE team_id = $1 AND deleted_at IS NULL
       ORDER BY name
-    `,
-      [req.user.teamId]
-    );
+    `;
+    let params = [teamId];
 
-    res.json(result.rows);
+    if (!isNaN(page) && !isNaN(limit)) {
+      const offset = (page - 1) * limit;
+      query += ` LIMIT $2 OFFSET $3`;
+      params.push(limit, offset);
+      
+      const countRes = await pool.query(
+        `SELECT COUNT(*) FROM athletes WHERE team_id = $1 AND deleted_at IS NULL`,
+        [teamId]
+      );
+      const totalCount = parseInt(countRes.rows[0].count);
+      const totalPages = Math.ceil(totalCount / limit);
+      
+      const result = await pool.query(query, params);
+      return res.json({ data: result.rows, totalCount, totalPages, currentPage: page });
+    } else {
+      const result = await pool.query(query, params);
+      return res.json(result.rows);
+    }
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch athletes" });
@@ -34,9 +57,9 @@ router.get("/:id", async (req, res) => {
       SELECT a.*, t.name as team_name
       FROM athletes a
       JOIN teams t ON a.team_id = t.id
-      WHERE a.id = $1 AND a.team_id = $2
+      WHERE a.id = $1 AND a.team_id = $2 AND a.deleted_at IS NULL
     `,
-      [req.params.id, req.user.teamId]
+      [req.params.id, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
 
     const athlete = athleteResult.rows[0];
@@ -91,7 +114,7 @@ router.post("/", async (req, res) => {
       VALUES ($1, $2, $3, 'Fit')
       RETURNING id
     `,
-      [req.user.teamId, name, position]
+      [(req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)), name, position]
     );
 
     res.status(201).json({
@@ -99,6 +122,9 @@ router.post("/", async (req, res) => {
       athleteId: result.rows[0].id,
     });
   } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: "Atlet dengan nama ini sudah ada di tim." });
+    }
     console.error(error);
     res.status(500).json({ error: "Failed to create athlete" });
   }
@@ -112,8 +138,8 @@ router.put("/:id", async (req, res) => {
 
     // Verify athlete belongs to user's team
     const athleteResult = await pool.query(
-      "SELECT id FROM athletes WHERE id = $1 AND team_id = $2",
-      [athleteId, req.user.teamId]
+      "SELECT id FROM athletes WHERE id = $1 AND team_id = $2 AND deleted_at IS NULL",
+      [athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
 
     const athlete = athleteResult.rows[0];
@@ -166,45 +192,20 @@ router.delete("/:id", async (req, res) => {
     }
 
     const athleteId = req.params.id;
-    const client = await pool.connect();
     
-    try {
-      await client.query('BEGIN');
+    const result = await pool.query(
+      "UPDATE athletes SET deleted_at = NOW(), deleted_by = $1 WHERE id = $2 AND team_id = $3 RETURNING id",
+      [req.user.id, athleteId, (req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
+    );
 
-      // 1. Delete all assessment_metrics for this athlete's assessments
-      await client.query(
-        `
-        DELETE FROM assessment_metrics 
-        WHERE assessment_id IN (SELECT id FROM assessments WHERE athlete_id = $1)
-      `,
-        [athleteId]
-      );
-
-      // 2. Delete all assessments for this athlete
-      await client.query("DELETE FROM assessments WHERE athlete_id = $1", [athleteId]);
-
-      // 3. Delete all training programs for this athlete
-      await client.query("DELETE FROM training_programs WHERE athlete_id = $1", [athleteId]);
-
-      // 4. Finally, delete the athlete
-      const result = await client.query(
-        "DELETE FROM athletes WHERE id = $1 AND team_id = $2",
-        [athleteId, req.user.teamId]
-      );
-
-      if (result.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: "Athlete not found" });
-      }
-
-      await client.query('COMMIT');
-      res.json({ message: "Athlete deleted successfully" });
-    } catch (e) {
-      await client.query('ROLLBACK');
-      throw e;
-    } finally {
-      client.release();
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Athlete not found" });
     }
+
+    if (req.user && req.user.id) {
+      await logActivity(req.user.id, `Menghapus atlet (ID: ${athleteId}) ke Recycle Bin`, "Keamanan", "Berhasil", req.ip);
+    }
+    res.json({ message: "Athlete moved to Recycle Bin successfully" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to delete athlete" });
