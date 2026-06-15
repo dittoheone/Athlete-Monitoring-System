@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { JWT_SECRET } = require("../utils/config");
 const logger = require("../utils/logger");
+const { pool } = require("../database/init");
 
 // Middleware to verify JWT token
 function authenticateToken(req, res, next) {
@@ -17,6 +18,13 @@ function authenticateToken(req, res, next) {
       audience: 'athlete-monitoring-users'
     });
     req.user = decoded;
+    
+    // Asynchronously update last_active timestamp
+    if (decoded && decoded.id) {
+      pool.query('UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = $1', [decoded.id])
+        .catch(err => logger.error('Failed to update last_active:', err));
+    }
+    
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {

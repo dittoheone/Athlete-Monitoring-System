@@ -9,7 +9,7 @@ teamRouter.use(authenticateToken);
 // Get all teams
 teamRouter.get("/", async (req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM teams");
+    const result = await pool.query("SELECT * FROM teams WHERE deleted_at IS NULL");
     res.json(result.rows);
   } catch (error) {
     console.error(error);
@@ -20,13 +20,13 @@ teamRouter.get("/", async (req, res) => {
 // Get user's team details
 teamRouter.get("/my-team", async (req, res) => {
   try {
-    const team = await queries.getTeamById(req.user.teamId);
+    const team = await queries.getTeamById((req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
     if (!team) {
       return res.status(404).json({ error: "Team not found" });
     }
 
-    const members = await queries.getTeamMembers(req.user.teamId);
-    const athleteCount = await queries.getTeamAthleteCount(req.user.teamId);
+    const members = await queries.getTeamMembers((req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
+    const athleteCount = await queries.getTeamAthleteCount((req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
 
     res.json({
       ...team,
@@ -42,7 +42,7 @@ teamRouter.get("/my-team", async (req, res) => {
 // Get team overview for dashboard
 teamRouter.get("/overview", async (req, res) => {
   try {
-    const athletes = await queries.getTeamOverview(req.user.teamId);
+    const athletes = await queries.getTeamOverview((req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null)));
 
     // Get status distribution
     const statusCounts = {
@@ -75,10 +75,10 @@ teamRouter.get("/overview", async (req, res) => {
         JOIN assessment_metrics am ON a.id = am.assessment_id
         JOIN athletes ath ON a.athlete_id = ath.id
         WHERE ath.team_id = $1 
-          AND am.metric_category = 'Pemeriksaan Fisik'
+          AND am.metric_category = 'Fisik & BIA'
         ORDER BY a.athlete_id, a.date DESC
       `,
-      [req.user.teamId]
+      [(req.query.teamId || (req.user.teams && req.user.teams.length > 0 ? req.user.teams[0].id : null))]
     );
     const recentAssessments = recentAssessmentsResult.rows;
 
